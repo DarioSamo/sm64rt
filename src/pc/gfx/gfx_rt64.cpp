@@ -249,11 +249,6 @@ void gfx_rt64_toggle_inspector() {
 	else {
 		RT64.inspector = RT64.lib.CreateInspector(RT64.device);
 	}
-
-	// Update cursor visibility while in fullscreen according to the inspector's visibility.
-	if (RT64.isFullScreen) {
-		ShowCursor(RT64.inspector != nullptr);
-	}
 }
 
 static void onkeydown(WPARAM w_param, LPARAM l_param) {
@@ -276,7 +271,6 @@ static void gfx_rt64_toggle_full_screen(bool enable) {
     // so do borderless instead. If DWM is enabled, this means we get one monitor
     // sync interval of latency extra. On Win 10 however (maybe Win 8 too), due to
     // "fullscreen optimizations" the latency is eliminated.
-
     if (enable == RT64.isFullScreen) {
         return;
     }
@@ -294,8 +288,6 @@ static void gfx_rt64_toggle_full_screen(bool enable) {
             SetWindowPos(RT64.hwnd, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_FRAMECHANGED);
             ShowWindow(RT64.hwnd, SW_RESTORE);
         }
-
-        ShowCursor(true);
     } else {
         // Save if window is maximized or not
         WINDOWPLACEMENT windowPlacement;
@@ -322,8 +314,6 @@ static void gfx_rt64_toggle_full_screen(bool enable) {
         // Set borderless full screen to that monitor
         SetWindowLongPtr(RT64.hwnd, GWL_STYLE, WS_VISIBLE | WS_POPUP);
         SetWindowPos(RT64.hwnd, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_FRAMECHANGED);
-
-        ShowCursor(RT64.inspector != nullptr);
     }
 
     RT64.isFullScreen = enable;
@@ -386,6 +376,8 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 		game_exit();
 		break;
 	case WM_ACTIVATEAPP:
+		RT64.windowActive = (wParam == TRUE);
+
         if (RT64.on_all_keys_up != nullptr) {
         	RT64.on_all_keys_up();
 		}
@@ -431,6 +423,25 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 	case WM_KEYUP:
 		onkeyup(wParam, lParam);
 		break;
+#ifdef BETTERCAMERA
+	case WM_INPUT: {
+		// Skip mouselook events if inspector is active.
+		if (RT64.inspector != nullptr) {
+			break;
+		}
+		
+		UINT dwSize = sizeof(RAWINPUT);
+		static BYTE lpb[sizeof(RAWINPUT)];
+		GetRawInputData((HRAWINPUT)(lParam), RID_INPUT, lpb, &dwSize, sizeof(RAWINPUTHEADER));
+		RAWINPUT* raw = (RAWINPUT*)(lpb);
+		if (raw->header.dwType == RIM_TYPEMOUSE) {
+			RT64.deltaMouseX += raw->data.mouse.lLastX;
+			RT64.deltaMouseY += raw->data.mouse.lLastY;
+    	} 
+
+		break;
+	}
+#endif
 	case WM_PAINT: {
 		if (RT64.view != nullptr) {
 			if (configWindow.settings_changed) {
@@ -1254,6 +1265,13 @@ static void gfx_rt64_rapi_shutdown(void) {
 }
 
 static void gfx_rt64_rapi_start_frame(void) {
+	// Determine cursor visibility base on the current camera mouselook support and the inspector.
+	bool newCursorVisible = (!RT64.isFullScreen && !RT64.mouselookEnabled) || (RT64.inspector != nullptr);
+	if (RT64.cursorVisible != newCursorVisible) {
+		ShowCursor(newCursorVisible);
+		RT64.cursorVisible = newCursorVisible;
+	}
+
 	RT64.background = true;
     RT64.graphNodeMod = nullptr;
 	if (RT64.inspector != nullptr) {

@@ -134,7 +134,14 @@ struct RT64Context {
 	bool isFullScreen = false;
 	bool lastMaximizedState = false;
 	bool useVsync = true;
+	bool cursorVisible = true;
+	bool windowActive = true;
 	RECT lastWindowRect;
+	
+	// Mouselook support.
+	bool mouselookEnabled = false;
+	int deltaMouseX = 0;
+	int deltaMouseY = 0;
 
 	// Game data.
 	RT64_MATERIAL defaultMaterial;
