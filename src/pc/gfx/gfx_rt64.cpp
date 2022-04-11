@@ -27,6 +27,14 @@ extern "C" {
 #include "gfx_rt64_serialization.h"
 #include "gfx_rt64_geo_map.h"
 
+const unsigned short MouseButtonFlags[MAX_MOUSE_BUTTONS][2] = {
+	{ RI_MOUSE_BUTTON_1_DOWN, RI_MOUSE_BUTTON_1_UP },
+	{ RI_MOUSE_BUTTON_2_DOWN, RI_MOUSE_BUTTON_2_UP },
+	{ RI_MOUSE_BUTTON_3_DOWN, RI_MOUSE_BUTTON_3_UP },
+	{ RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP },
+	{ RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP },
+};
+
 uint16_t shaderVariantKey(bool raytrace, int filter, int hAddr, int vAddr, bool normalMap, bool specularMap) {
 	uint16_t key = 0, fact = 1;
 	key += raytrace ? fact : 0; fact *= 2;
@@ -423,7 +431,6 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 	case WM_KEYUP:
 		onkeyup(wParam, lParam);
 		break;
-#ifdef BETTERCAMERA
 	case WM_INPUT: {
 		// Skip mouselook events if inspector is active.
 		if (RT64.inspector != nullptr) {
@@ -437,11 +444,22 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 		if (raw->header.dwType == RIM_TYPEMOUSE) {
 			RT64.deltaMouseX += raw->data.mouse.lLastX;
 			RT64.deltaMouseY += raw->data.mouse.lLastY;
-    	} 
+
+			// Detect mouse button states if any of them were enabled.
+			if (raw->data.mouse.usButtonFlags & 0x3FF) {
+				for (unsigned short b = 0; b < MAX_MOUSE_BUTTONS; b++) {
+					if (raw->data.mouse.usButtonFlags & MouseButtonFlags[b][0]) {
+						RT64.mouseButtons |= (1 << b);
+					}
+					else if (raw->data.mouse.usButtonFlags & MouseButtonFlags[b][1]) {
+						RT64.mouseButtons &= ~(1 << b);
+					}
+				}
+			}
+    	}
 
 		break;
 	}
-#endif
 	case WM_PAINT: {
 		if (RT64.view != nullptr) {
 			if (configWindow.settings_changed) {

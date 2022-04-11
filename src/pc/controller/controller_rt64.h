@@ -3,6 +3,8 @@
 
 #include "controller_api.h"
 
+#define VK_BASE_RT64 0x2000
+
 extern struct ControllerAPI controller_rt64_api;
 
 #endif

@@ -18,7 +18,7 @@ static struct ControllerAPI *controller_implementations[] = {
     &controller_sdl,
     #endif
     &controller_keyboard,
-    #if defined(RAPI_RT64) && defined(BETTERCAMERA)
+    #ifdef RAPI_RT64
     &controller_rt64_api,
     #endif
 };

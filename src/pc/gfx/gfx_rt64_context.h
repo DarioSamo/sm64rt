@@ -25,6 +25,7 @@
 #define MAX_DYNAMIC_LIGHTS				MAX_LIGHTS - MAX_LEVEL_LIGHTS
 #define MAX_LEVELS						40
 #define MAX_AREAS						3
+#define MAX_MOUSE_BUTTONS				5
 
 struct ShaderProgram {
     uint32_t shaderId;
@@ -142,6 +143,7 @@ struct RT64Context {
 	bool mouselookEnabled = false;
 	int deltaMouseX = 0;
 	int deltaMouseY = 0;
+	int mouseButtons = 0;
 
 	// Game data.
 	RT64_MATERIAL defaultMaterial;
