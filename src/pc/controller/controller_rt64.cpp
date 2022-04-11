@@ -50,10 +50,12 @@ static void controller_rt64_api_read(OSContPad *pad) {
     }
 #endif
 
-    // Return current state of mouse buttons.
-    for (u32 i = 0; i < num_mouse_binds; ++i) {
-        if (RT64.mouseButtons & (1 << mouse_binds[i][0])) {
-            pad->button |= mouse_binds[i][1];
+    // Return current state of mouse buttons. Mouse buttons should only be detected if window is active.
+    if (RT64.windowActive) {
+        for (u32 i = 0; i < num_mouse_binds; ++i) {
+            if (RT64.mouseButtons & (1 << mouse_binds[i][0])) {
+                pad->button |= mouse_binds[i][1];
+            }
         }
     }
 
