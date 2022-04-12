@@ -5,8 +5,12 @@
 
 #include "gfx_rendering_api_config.h"
 
+#include <atomic>
 #include <map>
+#include <mutex>
+#include <queue>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -26,6 +30,9 @@
 #define MAX_LEVELS						40
 #define MAX_AREAS						3
 #define MAX_MOUSE_BUTTONS				5
+#define MAX_RENDER_FRAMES				3
+#define MAX_GPU_MESHES					8192
+#define MAX_GPU_INSTANCES				8192
 
 struct ShaderProgram {
     uint32_t shaderId;
@@ -76,6 +83,7 @@ struct RecordedInstance {
 
 struct RecordedTexture {
 	RT64_TEXTURE *texture;
+	RT64_TEXTURE_DESC texDesc;
 	bool linearFilter;
 	uint32_t cms;
 	uint32_t cmt;
@@ -117,6 +125,50 @@ struct AreaLighting {
 	RT64_SCENE_DESC sceneDesc;
 	RT64_LIGHT lights[MAX_LEVEL_LIGHTS];
 	int lightCount = 0;
+};
+
+struct RenderInstance {
+	RT64_INSTANCE_DESC desc;
+	
+	struct {
+		uint32_t diffuse = 0;
+		uint32_t normal = 0;
+		uint32_t specular = 0;
+	} textures;
+
+	struct {
+		ShaderProgram *program = nullptr;
+		bool raytrace;
+		int filter;
+		int hAddr;
+		int vAddr;
+		bool normalMap;
+		bool specularMap;
+	} shader;
+};
+
+struct RenderMesh {
+	float *vertexBuffer = nullptr;
+	uint64_t vertexBufferHash = 0;
+    uint32_t vertexCount = 0;
+	uint32_t vertexStride = 0;
+    uint32_t indexCount = 0;
+	bool useTexture = false;
+    bool raytrace = false;
+};
+
+struct RenderDisplayList {
+	std::vector<RenderInstance> instances;
+	std::vector<RenderMesh> meshes;
+	int drawCount = 0;
+};
+
+struct RenderFrame {
+	RecordedCamera camera;
+	std::unordered_map<uint32_t, RenderDisplayList> displayLists;
+	RT64_SCENE_DESC sceneDesc;
+	RT64_LIGHT lights[MAX_LIGHTS];
+    unsigned int lightCount = 0;
 };
 
 //	Convention of bits for different lights.
@@ -162,40 +214,53 @@ struct RT64Context {
 	// Runtime data.
 	RT64_LIBRARY lib;
 	RT64_DEVICE *device = nullptr;
-	RT64_INSPECTOR *inspector = nullptr;
 	RT64_SCENE *scene = nullptr;
 	RT64_VIEW *view = nullptr;
 	std::unordered_map<uint32_t, RecordedTexture> textures;
-	std::unordered_map<uint32_t, ShaderProgram *> shaderPrograms;
+	std::unordered_map<uint32_t, ShaderProgram *> shaderPrograms; // TODO: Make access mutex.
 	std::unordered_map<uint32_t, RecordedDisplayList> displayLists;
 	std::unordered_map<void *, RecordedMod *> graphNodeMods;
 	std::unordered_map<uint64_t, RT64_MESH *> staticMeshCache;
 	std::unordered_map<uint64_t, DynamicMesh> dynamicMeshPool;
 	unsigned int indexTriangleList[GFX_MAX_BUFFERED];
-	RT64_LIGHT lights[MAX_LIGHTS];
-    unsigned int lightCount;
     RecordedLight dynamicLights[MAX_DYNAMIC_LIGHTS];
-    unsigned int dynamicLightCount;
+    unsigned int dynamicLightCount = 0;
+
+	// Render thread.
+	std::thread *renderThread = nullptr;
+	RT64_INSPECTOR *renderInspector = nullptr;
+	RenderFrame renderFrames[MAX_RENDER_FRAMES];
+	int CPUFrameIndex = 0;
+	int GPUFrameIndex = -1;
+	RT64_MESH *GPURasterPool[MAX_GPU_MESHES];
+	int GPURasterPoolCount = 0;
+	int GPURasterPoolSize = 0;
+	RT64_MESH *GPURtPool[MAX_GPU_MESHES];
+	int GPURtPoolCount = 0;
+	int GPURtPoolSize = 0;
+	RT64_INSTANCE *GPUInstancePool[MAX_GPU_INSTANCES];
+	int GPUInstancePoolCount = 0;
+	int GPUInstancePoolSize = 0;
+	std::mutex renderFrameIndexMutex;
+	std::queue<uint32_t> textureUploadQueue;
+	std::mutex textureUploadQueueMutex;
+	std::atomic<bool> renderThreadRunning;
+	std::atomic<bool> renderInspectorActive;
 
 	// Ray picking data.
-	bool pickTextureNextFrame;
-	bool pickTextureHighlight;
-	uint64_t pickedTextureHash;
+	bool pickTextureNextFrame = false;
+	bool pickTextureHighlight = false;
+	uint64_t pickedTextureHash = 0;
 	std::unordered_map<RT64_INSTANCE *, uint64_t> lastInstanceTextureHashes;
-
-	// Camera.
-	RecordedCamera camera;
-	RecordedCamera prevCamera;
-	bool prevCameraValid = false;
 
 	// Matrices.
 	RT64_MATRIX4 identityTransform;
 
 	// Rendering state.
-	int currentTile;
-    uint32_t currentTextureIds[2];
-	ShaderProgram *shaderProgram;
-	bool background;
+	int currentTile = 0;
+    uint32_t currentTextureIds[2] = { 0, 0 };
+	ShaderProgram *shaderProgram = nullptr;
+	bool background = false;
 	RT64_VECTOR3 fogColor;
 	RT64_VECTOR3 skyboxDiffuseMultiplier;
 	RT64_RECT scissorRect;
@@ -205,7 +270,6 @@ struct RT64Context {
 	RecordedMod *graphNodeMod;
 
 	// Timing.
-	std::vector<double> prevFrametimes;
 	unsigned int targetFPS = 30;
 	LARGE_INTEGER StartingTime, EndingTime;
 	LARGE_INTEGER Frequency;
