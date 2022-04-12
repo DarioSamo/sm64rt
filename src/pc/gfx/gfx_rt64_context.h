@@ -31,8 +31,6 @@
 #define MAX_AREAS						3
 #define MAX_MOUSE_BUTTONS				5
 #define MAX_RENDER_FRAMES				3
-#define MAX_GPU_MESHES					8192
-#define MAX_GPU_INSTANCES				8192
 
 struct ShaderProgram {
     uint32_t shaderId;
@@ -169,6 +167,24 @@ struct RenderFrame {
 	RT64_SCENE_DESC sceneDesc;
 	RT64_LIGHT lights[MAX_LIGHTS];
     unsigned int lightCount = 0;
+	uint32_t skyTextureId = 0;
+};
+
+struct GPUInstance {
+	RT64_INSTANCE *instance = nullptr;
+	RT64_MATRIX4 transform;
+};
+
+struct GPUMesh {
+	RT64_MESH *mesh = nullptr;
+	uint64_t vertexBufferHash = 0;
+	bool raytrace = false;
+};
+
+struct GPUDisplayList {
+	std::vector<GPUInstance> instances;
+	std::vector<GPUMesh> meshes;
+	int drawCount = 0;
 };
 
 //	Convention of bits for different lights.
@@ -232,18 +248,13 @@ struct RT64Context {
 	RenderFrame renderFrames[MAX_RENDER_FRAMES];
 	int CPUFrameIndex = 0;
 	int GPUFrameIndex = -1;
-	RT64_MESH *GPURasterPool[MAX_GPU_MESHES];
-	int GPURasterPoolCount = 0;
-	int GPURasterPoolSize = 0;
-	RT64_MESH *GPURtPool[MAX_GPU_MESHES];
-	int GPURtPoolCount = 0;
-	int GPURtPoolSize = 0;
-	RT64_INSTANCE *GPUInstancePool[MAX_GPU_INSTANCES];
-	int GPUInstancePoolCount = 0;
-	int GPUInstancePoolSize = 0;
+	std::unordered_map<uint32_t, GPUDisplayList> GPUDisplayLists;
 	std::mutex renderFrameIndexMutex;
 	std::queue<uint32_t> textureUploadQueue;
 	std::mutex textureUploadQueueMutex;
+	RT64_VIEW_DESC renderViewDesc;
+	bool renderViewDescChanged = false;
+	std::mutex renderViewDescMutex;
 	std::atomic<bool> renderThreadRunning;
 	std::atomic<bool> renderInspectorActive;
 
@@ -262,7 +273,8 @@ struct RT64Context {
 	ShaderProgram *shaderProgram = nullptr;
 	bool background = false;
 	RT64_VECTOR3 fogColor;
-	RT64_VECTOR3 skyboxDiffuseMultiplier;
+	uint32_t skyTextureId;
+	RT64_VECTOR3 skyDiffuseMultiplier;
 	RT64_RECT scissorRect;
 	RT64_RECT viewportRect;
 	int16_t fogMul;

@@ -312,20 +312,19 @@ static void gfx_rt64_toggle_full_screen(bool enable) {
 }
 
 void gfx_rt64_apply_config() {
-	RT64_VIEW_DESC desc;
-	desc.resolutionScale = configRT64ResScale / 100.0f;
-	desc.maxLights = configRT64MaxLights;
-	desc.diSamples = configRT64SphereLights ? 1 : 0;
-	desc.giSamples = configRT64GI ? 1 : 0;
-	desc.denoiserEnabled = configRT64Denoiser;
-	desc.motionBlurStrength = configRT64MotionBlurStrength / 100.0f;
-	desc.dlssMode = configRT64DlssMode;
-	RT64.useVsync = configWindow.vsync;
-	RT64.targetFPS = configRT64TargetFPS;
-	
-	/*
-	RT64.lib.SetViewDescription(RT64.view, desc);
-	*/
+	{
+    	const std::lock_guard<std::mutex> lock(RT64.renderViewDescMutex);
+		RT64.renderViewDesc.resolutionScale = configRT64ResScale / 100.0f;
+		RT64.renderViewDesc.maxLights = configRT64MaxLights;
+		RT64.renderViewDesc.diSamples = configRT64SphereLights ? 1 : 0;
+		RT64.renderViewDesc.giSamples = configRT64GI ? 1 : 0;
+		RT64.renderViewDesc.denoiserEnabled = configRT64Denoiser;
+		RT64.renderViewDesc.motionBlurStrength = configRT64MotionBlurStrength / 100.0f;
+		RT64.renderViewDesc.dlssMode = configRT64DlssMode;
+		RT64.useVsync = configWindow.vsync;
+		RT64.targetFPS = configRT64TargetFPS;
+		RT64.renderViewDescChanged = true;
+	}
 
 	// Adapted from gfx_dxgi.cpp
 	if (configWindow.fullscreen != RT64.isFullScreen) {
@@ -344,9 +343,7 @@ void gfx_rt64_apply_config() {
 }
 
 static void gfx_rt64_reset_logic_frame(void) {
-	/*
-	RT64.lib.SetViewSkyPlane(RT64.view, nullptr);
-	*/
+	RT64.skyTextureId = 0;
     RT64.dynamicLightCount = 0;
 }
 
@@ -560,7 +557,7 @@ static void gfx_rt64_wapi_init(const char *window_title) {
 	RT64.fogColor.x = 0.0f;
 	RT64.fogColor.y = 0.0f;
 	RT64.fogColor.z = 0.0f;
-	RT64.skyboxDiffuseMultiplier = { 1.0f, 1.0f, 1.0f };
+	RT64.skyDiffuseMultiplier = { 1.0f, 1.0f, 1.0f };
 	RT64.fogMul = RT64.fogOffset = 0;
 
 	// Initialize the triangle list index array used by all meshes.
@@ -808,6 +805,8 @@ static void gfx_rt64_rapi_process_mesh(float buf_vbo[], size_t buf_vbo_len, size
 	void *vertexBuffer = buf_vbo;
 	const unsigned int vertexFixedStride = 16 + 12;
 	vertexStride = vertexFixedStride + (useTexture ? 8 : 0) + numInputs * (useAlpha ? 16 : 12);
+	assert(((buf_vbo_len * 4) % vertexStride) == 0);
+
 	vertexCount = (buf_vbo_len * 4) / vertexStride;
 	assert(buf_vbo_num_tris == (vertexCount / 3));
 
@@ -974,7 +973,6 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 	// Retrieve the previous transform for the display list with this UID and store the current one.
 	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
 	auto &displayList = CPUFrame->displayLists[uid];
-
 	RecordedMod *textureMod = nullptr;
 	bool linearFilter = false;
 	bool interpolate = (uid != 0);
@@ -1359,11 +1357,10 @@ static void gfx_rt64_rapi_end_frame(void) {
 		// Update the scene's description.
 		const auto &areaLighting = RT64.levelAreaLighting[levelIndex][areaIndex];
 		CPUFrame->sceneDesc = areaLighting.sceneDesc;
-		/*
-		sceneDescCopy.skyDiffuseMultiplier.x *= RT64.skyboxDiffuseMultiplier.x;
-		sceneDescCopy.skyDiffuseMultiplier.y *= RT64.skyboxDiffuseMultiplier.y;
-		sceneDescCopy.skyDiffuseMultiplier.z *= RT64.skyboxDiffuseMultiplier.z;
-		*/
+		CPUFrame->sceneDesc.skyDiffuseMultiplier.x *= RT64.skyDiffuseMultiplier.x;
+		CPUFrame->sceneDesc.skyDiffuseMultiplier.y *= RT64.skyDiffuseMultiplier.y;
+		CPUFrame->sceneDesc.skyDiffuseMultiplier.z *= RT64.skyDiffuseMultiplier.z;
+		CPUFrame->skyTextureId = RT64.skyTextureId;
 
 		// Build lights array out of the static level lights and the dynamic lights.
 		int areaLightCount = areaLighting.lightCount;
@@ -1377,12 +1374,20 @@ static void gfx_rt64_rapi_end_frame(void) {
 		*/
 	}
 
-	// Switch the next GPU frame will be rendered to the one the CPU was writing.
-	// Start writing on the next CPU frame.
+	// Wait for the next CPU frame to be available if necessary.
 	RT64.renderFrameIndexMutex.lock();
-	RT64.GPUFrameIndex = RT64.CPUFrameIndex;
-	RT64.CPUFrameIndex = (RT64.CPUFrameIndex + 1) % MAX_RENDER_FRAMES;
+	int newCPUFrameIndex = (RT64.CPUFrameIndex + 1) % MAX_RENDER_FRAMES;
 	RT64.renderFrameIndexMutex.unlock();
+	bool keepWaiting = true;
+	while (keepWaiting) {
+		RT64.renderFrameIndexMutex.lock();
+		if (RT64.GPUFrameIndex != newCPUFrameIndex) {
+			RT64.CPUFrameIndex = newCPUFrameIndex;
+			keepWaiting = false;
+		}
+		
+		RT64.renderFrameIndexMutex.unlock();
+	}
 	
 	/*
 	// Detect if camera interpolation should be skipped.
@@ -1734,10 +1739,8 @@ static void gfx_rt64_rapi_set_graph_node_mod(void *graph_node_mod) {
 }
 
 static void gfx_rt64_rapi_set_skybox(uint32_t texture_id, float diffuse_color[3]) {
-	/*
-	RT64.skyboxDiffuseMultiplier = { diffuse_color[0], diffuse_color[1], diffuse_color[2] };
-	RT64.lib.SetViewSkyPlane(RT64.view, RT64.textures[texture_id].texture);
-	*/
+	RT64.skyTextureId = texture_id;
+	RT64.skyDiffuseMultiplier = { diffuse_color[0], diffuse_color[1], diffuse_color[2] };
 }
 
 extern "C" bool gfx_rt64_dlss_supported() {
@@ -1771,35 +1774,50 @@ RT64_TEXTURE *gfx_rt64_render_thread_find_texture(uint32_t textureKey) {
 	}
 }
 
-void gfx_rt64_render_thread_draw_display_list(RenderDisplayList *displayList) {
-	for (int i = 0; i < displayList->drawCount; i++) {
-		auto &mesh = displayList->meshes[i];
-		auto &instance = displayList->instances[i];
-		RT64_MESH **meshPool = mesh.raytrace ? RT64.GPURtPool : RT64.GPURasterPool;
-		int &meshPoolCount = mesh.raytrace ? RT64.GPURtPoolCount : RT64.GPURasterPoolCount;
-		int &meshPoolSize = mesh.raytrace ? RT64.GPURtPoolSize : RT64.GPURasterPoolSize;
+void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderDisplayList *displayList) {
+	auto &gpuDl = RT64.GPUDisplayLists[uid];
 
-		// Use a mesh from the pool.
-		int meshPoolIndex = meshPoolCount++;
-		if (meshPoolSize < meshPoolCount) {
-			assert(meshPoolSize < MAX_GPU_MESHES);
-			meshPool[meshPoolSize] = RT64.lib.CreateMesh(RT64.device, mesh.raytrace ? (RT64_MESH_RAYTRACE_ENABLED | RT64_MESH_RAYTRACE_UPDATABLE) : 0);
-			meshPoolSize++;
+	// Make the vectors large enough to fit all the instances and meshes.
+	if (gpuDl.instances.size() < displayList->drawCount) {
+		gpuDl.instances.resize(displayList->drawCount);
+	}
+
+	if (gpuDl.meshes.size() < displayList->drawCount) {
+		gpuDl.meshes.resize(displayList->drawCount);
+	}
+
+	for (int i = 0; i < displayList->drawCount; i++) {
+		auto &dstMesh = gpuDl.meshes[i];
+		auto &srcMesh = displayList->meshes[i];
+		auto &dstInstance = gpuDl.instances[i];
+		auto &srcInstance = displayList->instances[i];
+
+		// Destroy the existing mesh if the raytracing mode is different.
+		if ((dstMesh.mesh != nullptr) && (dstMesh.raytrace != srcMesh.raytrace)) {
+			RT64.lib.DestroyMesh(dstMesh.mesh);
+			dstMesh.mesh = nullptr;
 		}
 
-		// Update the mesh.
-		RT64.lib.SetMesh(meshPool[meshPoolIndex], mesh.vertexBuffer, mesh.vertexCount, mesh.vertexStride, RT64.indexTriangleList, mesh.indexCount);
+		// Create the mesh if it doesn't exist yet.
+		if (dstMesh.mesh == nullptr) {
+			dstMesh.mesh = RT64.lib.CreateMesh(RT64.device, srcMesh.raytrace ? (RT64_MESH_RAYTRACE_ENABLED | RT64_MESH_RAYTRACE_UPDATABLE) : 0);
+			dstMesh.raytrace = srcMesh.raytrace;
+		}
 
-		// Use an instance from the pool.
-		int instancePoolIndex = RT64.GPUInstancePoolCount++;
-		if (RT64.GPUInstancePoolSize < RT64.GPUInstancePoolCount) {
-			assert(RT64.GPUInstancePoolSize < MAX_GPU_INSTANCES);
-			RT64.GPUInstancePool[RT64.GPUInstancePoolSize] = RT64.lib.CreateInstance(RT64.scene);
-			RT64.GPUInstancePoolSize++;
+		// Update the mesh if the vertex buffer hash is different.
+		if (dstMesh.vertexBufferHash != srcMesh.vertexBufferHash) {
+			RT64.lib.SetMesh(dstMesh.mesh, srcMesh.vertexBuffer, srcMesh.vertexCount, srcMesh.vertexStride, RT64.indexTriangleList, srcMesh.indexCount);
+			dstMesh.vertexBufferHash = srcMesh.vertexBufferHash;
+		}
+
+		// Create the instance if it doesn't exist yet.
+		if (dstInstance.instance == nullptr) {
+			dstInstance.instance = RT64.lib.CreateInstance(RT64.scene);
+			dstInstance.transform = srcInstance.desc.transform;
 		}
 
 		// Create the shader if necessary.
-		const auto &shader = instance.shader;
+		const auto &shader = srcInstance.shader;
 		uint16_t variantKey = shaderVariantKey(shader.raytrace, shader.filter, shader.hAddr, shader.vAddr, shader.normalMap, shader.specularMap);
 		if (shader.program->shaderVariantMap[variantKey] == nullptr) {
 			int flags = shader.raytrace ? RT64_SHADER_RAYTRACE_ENABLED : RT64_SHADER_RASTER_ENABLED;
@@ -1813,14 +1831,19 @@ void gfx_rt64_render_thread_draw_display_list(RenderDisplayList *displayList) {
 
 			shader.program->shaderVariantMap[variantKey] = RT64.lib.CreateShader(RT64.device, shader.program->shaderId, shader.filter, shader.hAddr, shader.vAddr, flags);
 		}
-		
+
 		// Update the instance.
-		instance.desc.diffuseTexture = gfx_rt64_render_thread_find_texture(instance.textures.diffuse);
-		instance.desc.normalTexture = gfx_rt64_render_thread_find_texture(instance.textures.normal);
-		instance.desc.specularTexture = gfx_rt64_render_thread_find_texture(instance.textures.specular);
-		instance.desc.mesh = meshPool[meshPoolIndex];
-		instance.desc.shader = shader.program->shaderVariantMap[variantKey];
-		RT64.lib.SetInstanceDescription(RT64.GPUInstancePool[instancePoolIndex], instance.desc);
+		RT64_INSTANCE_DESC instDesc = srcInstance.desc;
+		instDesc.previousTransform = dstInstance.transform;
+		dstInstance.transform = instDesc.transform;
+		instDesc.diffuseTexture = gfx_rt64_render_thread_find_texture(srcInstance.textures.diffuse);
+		instDesc.normalTexture = gfx_rt64_render_thread_find_texture(srcInstance.textures.normal);
+		instDesc.specularTexture = gfx_rt64_render_thread_find_texture(srcInstance.textures.specular);
+		instDesc.mesh = dstMesh.mesh;
+		instDesc.shader = shader.program->shaderVariantMap[variantKey];
+		RT64.lib.SetInstanceDescription(dstInstance.instance, instDesc);
+
+		gpuDl.drawCount++;
 	}
 }
 
@@ -1843,32 +1866,36 @@ void gfx_rt64_render_thread_draw_frame(RenderFrame *frame) {
 		textureUploadQueue.pop();
 	}
 
-	// Reset the counter on the pools.
-	RT64.GPURasterPoolCount = 0;
-	RT64.GPURtPoolCount = 0;
-	RT64.GPUInstancePoolCount = 0;
-
 	// Queue up all display lists first.
 	auto dlIt = frame->displayLists.begin();
 	while (dlIt != frame->displayLists.end()) {
-		gfx_rt64_render_thread_draw_display_list(&dlIt->second);
+		gfx_rt64_render_thread_draw_display_list(dlIt->first, &dlIt->second);
 		dlIt++;
 	}
 
-	// Destroy all unused meshes and instances from the GPU pool.
-	while (RT64.GPURasterPoolSize > RT64.GPURasterPoolCount) {
-		RT64.lib.DestroyMesh(RT64.GPURasterPool[RT64.GPURasterPoolSize - 1]);
-		RT64.GPURasterPoolSize--;
-	}
+	// Clean up any unused instances or meshes from the GPU display lists.
+	auto gpuDlIt = RT64.GPUDisplayLists.begin();
+	while (gpuDlIt != RT64.GPUDisplayLists.end()) {
+		auto &dl = gpuDlIt->second;
+		
+		// Destroy all unused instances.
+		while (dl.instances.size() > dl.drawCount) {
+			auto &dynInst = dl.instances.back();
+			RT64.lib.DestroyInstance(dynInst.instance);
+			dl.instances.pop_back();
+		}
 
-	while (RT64.GPURtPoolSize > RT64.GPURtPoolCount) {
-		RT64.lib.DestroyMesh(RT64.GPURtPool[RT64.GPURtPoolSize - 1]);
-		RT64.GPURtPoolSize--;
-	}
+		// Destroy all unused meshes.
+		while (dl.meshes.size() > dl.drawCount) {
+			auto &dynMesh = dl.meshes.back();
+			RT64.lib.DestroyMesh(dynMesh.mesh);
+			dl.meshes.pop_back();
+		}
 
-	while (RT64.GPUInstancePoolSize > RT64.GPUInstancePoolCount) {
-		RT64.lib.DestroyInstance(RT64.GPUInstancePool[RT64.GPUInstancePoolSize - 1]);
-		RT64.GPUInstancePoolSize--;
+		// Reset the draw counter for the next frame.
+		dl.drawCount = 0;
+
+		gpuDlIt++;
 	}
 
 	// Update the view and the scene.
@@ -1877,6 +1904,7 @@ void gfx_rt64_render_thread_draw_frame(RenderFrame *frame) {
 	RT64.lib.SetViewPerspective(RT64.view, viewMatrix, fovRadians, frame->camera.nearDist, frame->camera.farDist, true/*RT64.prevCameraValid*/);
 	RT64.lib.SetSceneLights(RT64.scene, frame->lights, frame->lightCount);
 	RT64.lib.SetSceneDescription(RT64.scene, frame->sceneDesc);
+	RT64.lib.SetViewSkyPlane(RT64.view, (frame->skyTextureId > 0) ? RT64.textures[frame->skyTextureId].texture : nullptr);
 
 	// Draw everything and update the window.
 	RT64.lib.DrawDevice(RT64.device, gfx_rt64_use_vsync() ? 1 : 0);
@@ -1904,13 +1932,23 @@ void gfx_rt64_render_thread() {
 	free(blankBytes);
 
 	while (RT64.renderThreadRunning) {
-		// Retrieve the index of the current GPU render frame.
+		// Wait for the next GPU frame to be available.
 		RT64.renderFrameIndexMutex.lock();
-		int frameIndex = RT64.GPUFrameIndex;
+		int newGPUFrameIndex = (RT64.GPUFrameIndex + 1) % MAX_RENDER_FRAMES;
 		RT64.renderFrameIndexMutex.unlock();
+		bool keepWaiting = true;
+		while (keepWaiting) {
+			RT64.renderFrameIndexMutex.lock();
+			if (RT64.CPUFrameIndex != newGPUFrameIndex) {
+				RT64.GPUFrameIndex = newGPUFrameIndex;
+				keepWaiting = false;
+			}
+
+			RT64.renderFrameIndexMutex.unlock();
+		}
 
 		// Render the current GPU frame if available.
-		if (frameIndex >= 0) {
+		if (newGPUFrameIndex >= 0) {
 			// Create or destroy the inspector depending on the current state of the flag.
 			if (RT64.renderInspectorActive && (RT64.renderInspector == nullptr)) {
 				RT64.renderInspector = RT64.lib.CreateInspector(RT64.device);
@@ -1920,10 +1958,18 @@ void gfx_rt64_render_thread() {
 				RT64.renderInspector = nullptr;
 			}
 
+			{
+				const std::lock_guard<std::mutex> lock(RT64.renderViewDescMutex);
+				if (RT64.renderViewDescChanged) {
+					RT64.lib.SetViewDescription(RT64.view, RT64.renderViewDesc);
+					RT64.renderViewDescChanged = false;
+				}
+			}
+
 			// Draw a frame (if available).
 			LARGE_INTEGER StartTime, EndTime, ElapsedMicroseconds;
 			QueryPerformanceCounter(&StartTime);
-			gfx_rt64_render_thread_draw_frame(&RT64.renderFrames[frameIndex]);
+			gfx_rt64_render_thread_draw_frame(&RT64.renderFrames[newGPUFrameIndex]);
 			QueryPerformanceCounter(&EndTime);
 			elapsed_time(StartTime, EndTime, RT64.Frequency, ElapsedMicroseconds);
 
