@@ -163,6 +163,7 @@ struct RenderDisplayList {
 
 struct RenderFrame {
 	RecordedCamera camera;
+	bool interpolateCamera = true;
 	std::unordered_map<uint32_t, RenderDisplayList> displayLists;
 	RT64_SCENE_DESC sceneDesc;
 	RT64_LIGHT lights[MAX_LIGHTS];
@@ -247,7 +248,6 @@ struct RT64Context {
 	RT64_INSPECTOR *renderInspector = nullptr;
 	RenderFrame renderFrames[MAX_RENDER_FRAMES];
 	int CPUFrameIndex = 0;
-	int GPUFrameIndex = -1;
 	std::unordered_map<uint32_t, GPUDisplayList> GPUDisplayLists;
 	std::mutex renderFrameIndexMutex;
 	std::queue<uint32_t> textureUploadQueue;

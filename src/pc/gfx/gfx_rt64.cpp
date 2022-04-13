@@ -637,6 +637,9 @@ static void gfx_rt64_wapi_init(const char *window_title) {
 }
 
 static void gfx_rt64_wapi_shutdown(void) {
+	RT64.renderThreadRunning = false;
+	RT64.renderThread->join();
+	delete RT64.renderThread;
 }
 
 static void gfx_rt64_wapi_set_keyboard_callbacks(bool (*on_key_down)(int scancode), bool (*on_key_up)(int scancode), void (*on_all_keys_up)(void)) {
@@ -1144,6 +1147,9 @@ static void gfx_rt64_rapi_shutdown(void) {
 static void gfx_rt64_rapi_start_frame(void) {
 	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
 
+	// Reset frame camera interpolation.
+	CPUFrame->interpolateCamera = true;
+
 	// Determine cursor visibility base on the current camera mouselook support and the inspector.
 	bool newCursorVisible = (!RT64.isFullScreen && !RT64.mouselookEnabled) || (RT64.renderInspectorActive);
 	if (RT64.cursorVisible != newCursorVisible) {
@@ -1267,34 +1273,9 @@ static void gfx_rt64_rapi_set_special_stage_lights(int levelIndex, int areaIndex
 
 void gfx_rt64_rapi_draw_frame(float frameWeight) {
 	/*
-	RT64_MATRIX4 viewMatrix;
-	float fovRadians;
-	static float *tempVertexBuffer = nullptr;
-	static size_t tempVertexBufferSize = 0;
-
-	// Calculate the interpolated camera.
-	if (RT64.prevCameraValid) {
-		viewMatrix = gfx_rt64_lerp_matrix(RT64.prevCamera.viewMatrix, RT64.camera.viewMatrix, frameWeight);
-		fovRadians = gfx_rt64_lerp_float(RT64.prevCamera.fovRadians, RT64.camera.fovRadians, frameWeight);
-	}
-	// Just use the current camera.
-	else {
-		viewMatrix = RT64.renderFrame.camera.viewMatrix;
-		fovRadians = RT64.renderFrame.camera.fovRadians;
-	}
-
 	// Interpolate the display lists.
 	auto displayListIt = RT64.displayLists.begin();
-	RT64_MATRIX4 dlTransform;
 	while (displayListIt != RT64.displayLists.end()) {
-		for (auto &dynInstance : displayListIt->second.instances) {
-			dynInstance.desc.previousTransform = dynInstance.desc.transform;
-			dynInstance.desc.transform = gfx_rt64_lerp_matrix(dynInstance.prevTransform, dynInstance.newTransform, frameWeight);
-			dynInstance.desc.scissorRect = gfx_rt64_lerp_rect(dynInstance.prevScissorRect, dynInstance.newScissorRect, frameWeight);
-			dynInstance.desc.viewportRect = gfx_rt64_lerp_rect(dynInstance.prevViewportRect, dynInstance.newViewportRect, frameWeight);
-			RT64.lib.SetInstanceDescription(dynInstance.instance, dynInstance.desc);
-		}
-
 		for (auto &dynMesh : displayListIt->second.meshes) {
 			if (!dynMesh.newVertexBufferValid) {
 				continue;
@@ -1374,20 +1355,10 @@ static void gfx_rt64_rapi_end_frame(void) {
 		*/
 	}
 
-	// Wait for the next CPU frame to be available if necessary.
+	// Increase the CPU frame index.
 	RT64.renderFrameIndexMutex.lock();
-	int newCPUFrameIndex = (RT64.CPUFrameIndex + 1) % MAX_RENDER_FRAMES;
+	RT64.CPUFrameIndex = (RT64.CPUFrameIndex + 1) % MAX_RENDER_FRAMES;
 	RT64.renderFrameIndexMutex.unlock();
-	bool keepWaiting = true;
-	while (keepWaiting) {
-		RT64.renderFrameIndexMutex.lock();
-		if (RT64.GPUFrameIndex != newCPUFrameIndex) {
-			RT64.CPUFrameIndex = newCPUFrameIndex;
-			keepWaiting = false;
-		}
-		
-		RT64.renderFrameIndexMutex.unlock();
-	}
 	
 	/*
 	// Detect if camera interpolation should be skipped.
@@ -1405,23 +1376,6 @@ static void gfx_rt64_rapi_end_frame(void) {
 	while (dlIt != RT64.displayLists.end()) {
 		auto &dl = dlIt->second;
 
-		// Destroy all unused instances.
-		while (dl.instances.size() > dl.newCount) {
-			auto &dynInst = dl.instances.back();
-			RT64.lib.DestroyInstance(dynInst.instance);
-			dl.instances.pop_back();
-		}
-
-		// Destroy all unused meshes.
-		while (dl.meshes.size() > dl.newCount) {
-			auto &dynMesh = dl.meshes.back();
-			free(dynMesh.prevVertexBuffer);
-			free(dynMesh.newVertexBuffer);
-			free(dynMesh.deltaVertexBuffer);
-			RT64.lib.DestroyMesh(dynMesh.mesh);
-			dl.meshes.pop_back();
-		}
-		
 		// Detect sudden transformation changes and skip interpolation if necessary.
 		const float MinDot = sqrt(2.0f) / -2.0f;
 		for (auto &dynInstance : dl.instances) {
@@ -1634,9 +1588,7 @@ static void gfx_rt64_rapi_set_camera_perspective(float fov_degrees, float near_d
     CPUFrame->camera.fovRadians = (fov_degrees / 180.0f) * M_PI;
 	CPUFrame->camera.nearDist = near_dist;
     CPUFrame->camera.farDist = far_dist;
-	/*
-	RT64.prevCameraValid = RT64.prevCameraValid && can_interpolate;
-	*/
+	CPUFrame->interpolateCamera = CPUFrame->interpolateCamera && can_interpolate;
 }
 
 static void gfx_rt64_rapi_set_camera_matrix(float matrix[4][4]) {
@@ -1774,50 +1726,53 @@ RT64_TEXTURE *gfx_rt64_render_thread_find_texture(uint32_t textureKey) {
 	}
 }
 
-void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderDisplayList *displayList) {
+inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *curFrame, RenderFrame *prevFrame, float curFrameWeight) {
 	auto &gpuDl = RT64.GPUDisplayLists[uid];
+	const auto &curDisplayList = curFrame->displayLists[uid];
+	const auto &prevDisplayList = prevFrame->displayLists[uid];
 
 	// Make the vectors large enough to fit all the instances and meshes.
-	if (gpuDl.instances.size() < displayList->drawCount) {
-		gpuDl.instances.resize(displayList->drawCount);
+	if (gpuDl.instances.size() < curDisplayList.drawCount) {
+		gpuDl.instances.resize(curDisplayList.drawCount);
 	}
 
-	if (gpuDl.meshes.size() < displayList->drawCount) {
-		gpuDl.meshes.resize(displayList->drawCount);
+	if (gpuDl.meshes.size() < curDisplayList.drawCount) {
+		gpuDl.meshes.resize(curDisplayList.drawCount);
 	}
 
-	for (int i = 0; i < displayList->drawCount; i++) {
+	for (int i = 0; i < curDisplayList.drawCount; i++) {
 		auto &dstMesh = gpuDl.meshes[i];
-		auto &srcMesh = displayList->meshes[i];
 		auto &dstInstance = gpuDl.instances[i];
-		auto &srcInstance = displayList->instances[i];
+		const auto &curMesh = curDisplayList.meshes[i];
+		const auto &curInstance = curDisplayList.instances[i];
+		const auto &prevInstance = (i < prevDisplayList.instances.size()) ? prevDisplayList.instances[i] : curDisplayList.instances[i];
 
 		// Destroy the existing mesh if the raytracing mode is different.
-		if ((dstMesh.mesh != nullptr) && (dstMesh.raytrace != srcMesh.raytrace)) {
+		if ((dstMesh.mesh != nullptr) && (dstMesh.raytrace != curMesh.raytrace)) {
 			RT64.lib.DestroyMesh(dstMesh.mesh);
 			dstMesh.mesh = nullptr;
 		}
 
 		// Create the mesh if it doesn't exist yet.
 		if (dstMesh.mesh == nullptr) {
-			dstMesh.mesh = RT64.lib.CreateMesh(RT64.device, srcMesh.raytrace ? (RT64_MESH_RAYTRACE_ENABLED | RT64_MESH_RAYTRACE_UPDATABLE) : 0);
-			dstMesh.raytrace = srcMesh.raytrace;
+			dstMesh.mesh = RT64.lib.CreateMesh(RT64.device, curMesh.raytrace ? (RT64_MESH_RAYTRACE_ENABLED | RT64_MESH_RAYTRACE_UPDATABLE) : 0);
+			dstMesh.raytrace = curMesh.raytrace;
 		}
 
 		// Update the mesh if the vertex buffer hash is different.
-		if (dstMesh.vertexBufferHash != srcMesh.vertexBufferHash) {
-			RT64.lib.SetMesh(dstMesh.mesh, srcMesh.vertexBuffer, srcMesh.vertexCount, srcMesh.vertexStride, RT64.indexTriangleList, srcMesh.indexCount);
-			dstMesh.vertexBufferHash = srcMesh.vertexBufferHash;
+		if (dstMesh.vertexBufferHash != curMesh.vertexBufferHash) {
+			RT64.lib.SetMesh(dstMesh.mesh, curMesh.vertexBuffer, curMesh.vertexCount, curMesh.vertexStride, RT64.indexTriangleList, curMesh.indexCount);
+			dstMesh.vertexBufferHash = curMesh.vertexBufferHash;
 		}
 
 		// Create the instance if it doesn't exist yet.
 		if (dstInstance.instance == nullptr) {
 			dstInstance.instance = RT64.lib.CreateInstance(RT64.scene);
-			dstInstance.transform = srcInstance.desc.transform;
+			dstInstance.transform = curInstance.desc.transform;
 		}
 
 		// Create the shader if necessary.
-		const auto &shader = srcInstance.shader;
+		const auto &shader = curInstance.shader;
 		uint16_t variantKey = shaderVariantKey(shader.raytrace, shader.filter, shader.hAddr, shader.vAddr, shader.normalMap, shader.specularMap);
 		if (shader.program->shaderVariantMap[variantKey] == nullptr) {
 			int flags = shader.raytrace ? RT64_SHADER_RAYTRACE_ENABLED : RT64_SHADER_RASTER_ENABLED;
@@ -1833,43 +1788,28 @@ void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderDisplayList *d
 		}
 
 		// Update the instance.
-		RT64_INSTANCE_DESC instDesc = srcInstance.desc;
+		RT64_INSTANCE_DESC instDesc = curInstance.desc;
 		instDesc.previousTransform = dstInstance.transform;
-		dstInstance.transform = instDesc.transform;
-		instDesc.diffuseTexture = gfx_rt64_render_thread_find_texture(srcInstance.textures.diffuse);
-		instDesc.normalTexture = gfx_rt64_render_thread_find_texture(srcInstance.textures.normal);
-		instDesc.specularTexture = gfx_rt64_render_thread_find_texture(srcInstance.textures.specular);
+		instDesc.transform = gfx_rt64_lerp_matrix(prevInstance.desc.transform, curInstance.desc.transform, curFrameWeight);
+		instDesc.scissorRect = gfx_rt64_lerp_rect(prevInstance.desc.scissorRect, curInstance.desc.scissorRect, curFrameWeight);
+		instDesc.viewportRect = gfx_rt64_lerp_rect(prevInstance.desc.viewportRect, curInstance.desc.viewportRect, curFrameWeight);
+		instDesc.diffuseTexture = gfx_rt64_render_thread_find_texture(curInstance.textures.diffuse);
+		instDesc.normalTexture = gfx_rt64_render_thread_find_texture(curInstance.textures.normal);
+		instDesc.specularTexture = gfx_rt64_render_thread_find_texture(curInstance.textures.specular);
 		instDesc.mesh = dstMesh.mesh;
 		instDesc.shader = shader.program->shaderVariantMap[variantKey];
 		RT64.lib.SetInstanceDescription(dstInstance.instance, instDesc);
+		dstInstance.transform = instDesc.transform;
 
 		gpuDl.drawCount++;
 	}
 }
 
-void gfx_rt64_render_thread_draw_frame(RenderFrame *frame) {
-	// Upload all textures on the queue. Work with a copy of the queue so it's free to keep 
-	// loading more textures during the next frame.
-	RT64.textureUploadQueueMutex.lock();
-	auto textureUploadQueue = RT64.textureUploadQueue;
-	RT64.textureUploadQueue = { };
-	RT64.textureUploadQueueMutex.unlock();
-
-	while (!textureUploadQueue.empty()) {
-		uint32_t textureKey = textureUploadQueue.front();
-		auto &recordedTexture = RT64.textures[textureKey];
-		assert(recordedTexture.texture == nullptr);
-		assert(recordedTexture.texDesc.bytes != nullptr);
-		recordedTexture.texture = RT64.lib.CreateTexture(RT64.device, recordedTexture.texDesc);
-		free(recordedTexture.texDesc.bytes);
-		recordedTexture.texDesc.bytes = nullptr;
-		textureUploadQueue.pop();
-	}
-
+void gfx_rt64_render_thread_draw_frame(RenderFrame *curFrame, RenderFrame *prevFrame, float curFrameWeight) {
 	// Queue up all display lists first.
-	auto dlIt = frame->displayLists.begin();
-	while (dlIt != frame->displayLists.end()) {
-		gfx_rt64_render_thread_draw_display_list(dlIt->first, &dlIt->second);
+	auto dlIt = curFrame->displayLists.begin();
+	while (dlIt != curFrame->displayLists.end()) {
+		gfx_rt64_render_thread_draw_display_list(dlIt->first, curFrame, prevFrame, curFrameWeight);
 		dlIt++;
 	}
 
@@ -1898,19 +1838,52 @@ void gfx_rt64_render_thread_draw_frame(RenderFrame *frame) {
 		gpuDlIt++;
 	}
 
-	// Update the view and the scene.
-	RT64_MATRIX4 viewMatrix = frame->camera.viewMatrix;
-	float fovRadians = frame->camera.fovRadians;
-	RT64.lib.SetViewPerspective(RT64.view, viewMatrix, fovRadians, frame->camera.nearDist, frame->camera.farDist, true/*RT64.prevCameraValid*/);
-	RT64.lib.SetSceneLights(RT64.scene, frame->lights, frame->lightCount);
-	RT64.lib.SetSceneDescription(RT64.scene, frame->sceneDesc);
-	RT64.lib.SetViewSkyPlane(RT64.view, (frame->skyTextureId > 0) ? RT64.textures[frame->skyTextureId].texture : nullptr);
+	// Interpolate and update the view.
+	RT64_MATRIX4 viewMatrix;
+	float fovRadians;
+	if (curFrame->interpolateCamera) {
+		viewMatrix = gfx_rt64_lerp_matrix(prevFrame->camera.viewMatrix, curFrame->camera.viewMatrix, curFrameWeight);
+		fovRadians = gfx_rt64_lerp_float(prevFrame->camera.fovRadians, curFrame->camera.fovRadians, curFrameWeight);
+	}
+	else {
+		viewMatrix = curFrame->camera.viewMatrix;
+		fovRadians = curFrame->camera.fovRadians;
+	}
+
+	RT64.lib.SetViewPerspective(RT64.view, viewMatrix, fovRadians, curFrame->camera.nearDist, curFrame->camera.farDist, curFrame->interpolateCamera);
+
+	// Update the scene.
+	RT64.lib.SetSceneLights(RT64.scene, curFrame->lights, curFrame->lightCount);
+	RT64.lib.SetSceneDescription(RT64.scene, curFrame->sceneDesc);
+	RT64.lib.SetViewSkyPlane(RT64.view, (curFrame->skyTextureId > 0) ? RT64.textures[curFrame->skyTextureId].texture : nullptr);
 
 	// Draw everything and update the window.
 	RT64.lib.DrawDevice(RT64.device, gfx_rt64_use_vsync() ? 1 : 0);
 }
 
+void gfx_rt64_render_thread_upload_texture_queue() {
+	// Upload all textures on the queue. Work with a copy of the queue so it's free to keep 
+	// loading more textures during the next frame.
+	RT64.textureUploadQueueMutex.lock();
+	auto textureUploadQueue = RT64.textureUploadQueue;
+	RT64.textureUploadQueue = { };
+	RT64.textureUploadQueueMutex.unlock();
+
+	while (!textureUploadQueue.empty()) {
+		uint32_t textureKey = textureUploadQueue.front();
+		auto &recordedTexture = RT64.textures[textureKey];
+		assert(recordedTexture.texture == nullptr);
+		assert(recordedTexture.texDesc.bytes != nullptr);
+		recordedTexture.texture = RT64.lib.CreateTexture(RT64.device, recordedTexture.texDesc);
+		free(recordedTexture.texDesc.bytes);
+		recordedTexture.texDesc.bytes = nullptr;
+		textureUploadQueue.pop();
+	}
+}
+
 void gfx_rt64_render_thread() {
+	LARGE_INTEGER StartTime, EndTime, ElapsedMicroseconds;
+
 	// Setup scene and view.
 	RT64.scene = RT64.lib.CreateScene(RT64.device);
 	RT64.view = RT64.lib.CreateView(RT64.scene);
@@ -1931,55 +1904,52 @@ void gfx_rt64_render_thread() {
 	RT64.blankTexture = RT64.lib.CreateTexture(RT64.device, texDesc);
 	free(blankBytes);
 
+	int curGPUFrameIndex = 0;
+	int prevGPUFrameIndex = 0;
+	int lastGPUFrameIndex = -1;
+	int renderTargetFPS = 30;
 	while (RT64.renderThreadRunning) {
-		// Wait for the next GPU frame to be available.
-		RT64.renderFrameIndexMutex.lock();
-		int newGPUFrameIndex = (RT64.GPUFrameIndex + 1) % MAX_RENDER_FRAMES;
-		RT64.renderFrameIndexMutex.unlock();
-		bool keepWaiting = true;
-		while (keepWaiting) {
-			RT64.renderFrameIndexMutex.lock();
-			if (RT64.CPUFrameIndex != newGPUFrameIndex) {
-				RT64.GPUFrameIndex = newGPUFrameIndex;
-				keepWaiting = false;
-			}
-
-			RT64.renderFrameIndexMutex.unlock();
+		// Create or destroy the inspector depending on the current state of the flag.
+		if (RT64.renderInspectorActive && (RT64.renderInspector == nullptr)) {
+			RT64.renderInspector = RT64.lib.CreateInspector(RT64.device);
+		}
+		else if (!RT64.renderInspectorActive && (RT64.renderInspector != nullptr)) {
+			RT64.lib.DestroyInspector(RT64.renderInspector);
+			RT64.renderInspector = nullptr;
 		}
 
-		// Render the current GPU frame if available.
-		if (newGPUFrameIndex >= 0) {
-			// Create or destroy the inspector depending on the current state of the flag.
-			if (RT64.renderInspectorActive && (RT64.renderInspector == nullptr)) {
-				RT64.renderInspector = RT64.lib.CreateInspector(RT64.device);
-			}
-			else if (!RT64.renderInspectorActive && (RT64.renderInspector != nullptr)) {
-				RT64.lib.DestroyInspector(RT64.renderInspector);
-				RT64.renderInspector = nullptr;
-			}
-
-			{
-				const std::lock_guard<std::mutex> lock(RT64.renderViewDescMutex);
-				if (RT64.renderViewDescChanged) {
-					RT64.lib.SetViewDescription(RT64.view, RT64.renderViewDesc);
-					RT64.renderViewDescChanged = false;
-				}
-			}
-
-			// Draw a frame (if available).
-			LARGE_INTEGER StartTime, EndTime, ElapsedMicroseconds;
-			QueryPerformanceCounter(&StartTime);
-			gfx_rt64_render_thread_draw_frame(&RT64.renderFrames[newGPUFrameIndex]);
-			QueryPerformanceCounter(&EndTime);
-			elapsed_time(StartTime, EndTime, RT64.Frequency, ElapsedMicroseconds);
-
-			if (RT64.renderInspector != nullptr) {
-				char message[64];
-				RT64.lib.PrintClearInspector(RT64.renderInspector);
-				sprintf(message, "FRAMETIME: %.3f ms\n", ElapsedMicroseconds.QuadPart / 1000.0);
-				RT64.lib.PrintMessageInspector(RT64.renderInspector, message);
+		// Update the view description if modified.
+		{
+			const std::lock_guard<std::mutex> lock(RT64.renderViewDescMutex);
+			if (RT64.renderViewDescChanged) {
+				renderTargetFPS = RT64.targetFPS;
+				RT64.lib.SetViewDescription(RT64.view, RT64.renderViewDesc);
+				RT64.renderViewDescChanged = false;
 			}
 		}
+
+		gfx_rt64_render_thread_upload_texture_queue();
+		
+		// Determine the indices of the frames that will be drawn.
+		{
+			const std::lock_guard<std::mutex> lock(RT64.renderFrameIndexMutex);
+			curGPUFrameIndex = (RT64.CPUFrameIndex == 0) ? (MAX_RENDER_FRAMES - 1) : (RT64.CPUFrameIndex - 1);
+			prevGPUFrameIndex = (curGPUFrameIndex == 0) ? (MAX_RENDER_FRAMES - 1) : (curGPUFrameIndex - 1);
+		}
+
+		// Skip drawing frames if the index in the circular buffer hasn't changed.
+		if (lastGPUFrameIndex == curGPUFrameIndex) {
+			continue;
+		}
+
+		// Draw as many frames as the target framerate indicates.
+		const unsigned int framesPerUpdate = renderTargetFPS / 30;
+		const float weightPerFrame = 1.0f / framesPerUpdate;
+		for (int f = 0; f < framesPerUpdate; f++) {
+			gfx_rt64_render_thread_draw_frame(&RT64.renderFrames[curGPUFrameIndex], &RT64.renderFrames[prevGPUFrameIndex], (f + 1) * weightPerFrame);
+		}
+
+		lastGPUFrameIndex = curGPUFrameIndex;
 	}
 }
 
