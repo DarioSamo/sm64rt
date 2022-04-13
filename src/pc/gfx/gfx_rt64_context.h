@@ -236,7 +236,8 @@ struct RT64Context {
 	RT64_SCENE *scene = nullptr;
 	RT64_VIEW *view = nullptr;
 	std::unordered_map<uint32_t, RecordedTexture> textures;
-	std::unordered_map<uint32_t, ShaderProgram *> shaderPrograms; // TODO: Make access mutex.
+	std::unordered_map<uint32_t, ShaderProgram *> shaderPrograms;
+	std::mutex shaderProgramsMutex;
 	std::unordered_map<uint32_t, RecordedDisplayList> displayLists;
 	std::unordered_map<void *, RecordedMod *> graphNodeMods;
 	std::unordered_map<uint64_t, RT64_MESH *> staticMeshCache;
