@@ -190,7 +190,7 @@ typedef struct {
 } RT64_INSTANCE_DESC;
 
 typedef struct {
-	const void *bytes;
+	void *bytes;
 	int byteCount;
 	int format;
 	int width;

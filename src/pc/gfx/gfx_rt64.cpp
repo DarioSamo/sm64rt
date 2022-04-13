@@ -479,13 +479,23 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 			configWindow.settings_changed = false;
 		}
 
-		// Run one game iteration.
-		if (!RT64.pauseMode && RT64.run_one_game_iter != nullptr) {
-			LARGE_INTEGER StartTime, EndTime;
-			QueryPerformanceCounter(&StartTime);
+		if (!RT64.pauseMode && (RT64.run_one_game_iter != nullptr)) {
+			// Run one game iteration.
+			LARGE_INTEGER GameStartTime, GameEndTime;
+			QueryPerformanceCounter(&GameStartTime);
 			gfx_rt64_reset_logic_frame();
 			RT64.run_one_game_iter();
-			elapsed_time(StartTime, EndTime, RT64.Frequency, ElapsedMicroseconds);
+			QueryPerformanceCounter(&GameEndTime);
+			elapsed_time(GameStartTime, GameEndTime, RT64.Frequency, ElapsedMicroseconds);
+
+			// Print the time it took to process the frame.
+			if (RT64.renderInspectorActive) {
+				const std::lock_guard<std::mutex> lock(RT64.renderInspectorMutex);
+				char gameDeltaTimeMsg[64];
+				sprintf(gameDeltaTimeMsg, "GAME: %.3f ms\n", ElapsedMicroseconds.QuadPart / 1000.0);
+				RT64.renderInspectorMessages.clear();
+				RT64.renderInspectorMessages.push_back(std::string(gameDeltaTimeMsg));
+			}
 		}
 
 		if (!RT64.turboMode) {
@@ -562,8 +572,10 @@ static void gfx_rt64_wapi_init(const char *window_title) {
 	QueryPerformanceFrequency(&RT64.Frequency);
 	QueryPerformanceCounter(&RT64.StartingTime);
 	RT64.dropNextFrame = false;
-	RT64.pauseMode = false;
 	RT64.turboMode = false;
+	
+	// Start the game paused. Let the render thread unpause it once it's ready.
+	RT64.pauseMode = true;
 
 	// Load the default global lights and the ones from a file afterwards.
 	gfx_rt64_default_level_lights();
@@ -580,6 +592,7 @@ static void gfx_rt64_wapi_init(const char *window_title) {
 	RT64.fogColor.z = 0.0f;
 	RT64.skyDiffuseMultiplier = { 1.0f, 1.0f, 1.0f };
 	RT64.fogMul = RT64.fogOffset = 0;
+	RT64.dlssSupport = false;
 
 	// Initialize the triangle list index array used by all meshes.
 	unsigned int index = 0;
@@ -647,9 +660,6 @@ static void gfx_rt64_wapi_init(const char *window_title) {
 		
 		abort();
 	}
-
-	// Preload shaders to avoid ingame stuttering.
-	gfx_rt64_render_thread_preload_shaders();
 
 	// Create the render thread.
 	RT64.renderThreadRunning = true;
@@ -1259,6 +1269,7 @@ static inline bool gfx_rt64_skip_matrix_lerp(const RT64_MATRIX4 &a, const RT64_M
 }
 
 static void gfx_rt64_rapi_set_special_stage_lights(int levelIndex, int areaIndex) {
+	/*
 	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
 
 	// Dynamic Lakitu camera light for Shifting Sand Land Pyramid.
@@ -1282,60 +1293,6 @@ static void gfx_rt64_rapi_set_special_stage_lights(int levelIndex, int areaIndex
 		dynLight.light.groupBits = RT64_LIGHT_GROUP_DEFAULT;
 		dynLight.dlUid = 0;
 		dynLight.dlInstIndex = -1;
-	}
-}
-
-void gfx_rt64_rapi_draw_frame(float frameWeight) {
-	/*
-	// Interpolate the display lists.
-	auto displayListIt = RT64.displayLists.begin();
-	while (displayListIt != RT64.displayLists.end()) {
-		for (auto &dynMesh : displayListIt->second.meshes) {
-			if (!dynMesh.newVertexBufferValid) {
-				continue;
-			}
-
-			// Recreate the temporal buffer if required.
-			size_t requiredVertexBufferSize = dynMesh.vertexCount * dynMesh.vertexStride;
-			if (requiredVertexBufferSize > tempVertexBufferSize) {
-				free(tempVertexBuffer);
-				tempVertexBuffer = (float *)(malloc(requiredVertexBufferSize));
-				tempVertexBufferSize = requiredVertexBufferSize;
-			}
-
-			// Interpolate all the floats in the temporal vertex buffer.
-			size_t f = 0;
-			size_t floatCount = requiredVertexBufferSize / sizeof(float);
-			float *tempPtr = tempVertexBuffer;
-			float *prevPtr = dynMesh.prevVertexBuffer;
-			float *newPtr = dynMesh.newVertexBuffer;
-			while (f < floatCount) {
-				*tempPtr = gfx_rt64_lerp_float(*prevPtr, *newPtr, frameWeight);
-				tempPtr++;
-				prevPtr++;
-				newPtr++;
-				f++;
-			}
-
-			// Update the mesh using the temporal vertex buffer.
-			RT64.lib.SetMesh(dynMesh.mesh, tempVertexBuffer, dynMesh.vertexCount, dynMesh.vertexStride, RT64.indexTriangleList, dynMesh.indexCount);
-		}
-
-		displayListIt++;
-	}
-
-	// Interpolate the dynamic lights.
-	int levelIndex = gfx_rt64_get_level_index();
-	int areaIndex = gfx_rt64_get_area_index();
-	int areaLightCount = RT64.levelAreaLighting[levelIndex][areaIndex].lightCount;
-	for (int i = 0; i < RT64.dynamicLightCount; i++) {
-		auto &light = RT64.lights[areaLightCount + i];
-		const auto &prevLight = RT64.dynamicLights[i].prevLight;
-		const auto &newLight = RT64.dynamicLights[i].newLight;
-		light.position = gfx_rt64_lerp_vector3(prevLight.position, newLight.position, frameWeight);
-		light.attenuationRadius = gfx_rt64_lerp_float(prevLight.attenuationRadius, newLight.attenuationRadius, frameWeight);
-		light.pointRadius = gfx_rt64_lerp_float(prevLight.pointRadius, newLight.pointRadius, frameWeight);
-		light.shadowOffset = gfx_rt64_lerp_float(prevLight.shadowOffset, newLight.shadowOffset, frameWeight);
 	}
 	*/
 }
@@ -1621,10 +1578,7 @@ static void gfx_rt64_rapi_set_skybox(uint32_t texture_id, float diffuse_color[3]
 }
 
 extern "C" bool gfx_rt64_dlss_supported() {
-	return false;
-	/*
-	return RT64.lib.GetViewFeatureSupport(RT64.view, RT64_FEATURE_DLSS);
-	*/
+	return RT64.dlssSupport;
 }
 
 extern "C" void gfx_register_layout_graph_node(void *geoLayout, void *graphNode) {
@@ -1652,6 +1606,8 @@ RT64_TEXTURE *gfx_rt64_render_thread_find_texture(uint32_t textureKey) {
 }
 
 inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *curFrame, RenderFrame *prevFrame, float curFrameWeight) {
+	static float *tempVertexBuffer = nullptr;
+	static size_t tempVertexBufferSize = 0;
 	auto &gpuDl = RT64.GPUDisplayLists[uid];
 	const auto &curDisplayList = curFrame->displayLists[uid];
 	const auto &prevDisplayList = prevFrame->displayLists[uid];
@@ -1696,81 +1652,6 @@ inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *
 			dstInstance.transform = curInstance.desc.transform;
 		}
 
-		/*
-			// Compute the delta vertex buffer.
-			for (auto &dynMesh : dl.meshes) {
-				if (dynMesh.raytrace) {
-					rtInstanceCount++;
-				}
-				else {
-					rasterInstanceCount++;
-				}
-
-				if (!dynMesh.newVertexBufferValid) {
-					continue;
-				}
-
-				float *prevPtr = dynMesh.prevVertexBuffer;
-				float *newPtr = dynMesh.newVertexBuffer;
-				float *deltaPtr = dynMesh.deltaVertexBuffer;
-				size_t f = 0, i = 0;
-				size_t imax = dynMesh.vertexStride / sizeof(float);
-				size_t floatCount = dynMesh.vertexCount * imax;
-				float deltaValue = 0.0f;
-				const float Epsilon = 1e-6f;
-				const float MagnitudeThreshold = 10.0f;
-				while (f < floatCount) {
-					deltaValue = *newPtr - *prevPtr;
-
-					switch (i) {
-					// Position interpolation.
-					case 0:
-					case 1:
-					case 2:
-						// Skip interpolating objects that suddenly teleport the vertices around.
-						// This helps with effects like lava bubbles, snow, and other types of effects without
-						// having to generate UIDs for each individual particle.
-						// Since this relies on an arbitrary value to detect the magnitude difference, it might
-						// break depending on the game. The minimum value of 1.0 is also reliant on the fact
-						// the game never sends vertices with non-integer values when untransformed, making it
-						// the smallest possible value that isn't zero.
-						if ((fabsf(deltaValue) / std::max(fabsf(*deltaPtr), 1.0f)) >= MagnitudeThreshold) {
-							*prevPtr = *newPtr;
-						}
-
-						break;
-					// Texture coordinate interpolation.
-					case 7:
-					case 8:
-						if (dynMesh.useTexture) {
-							// Reuse previous delta if the delta values have different signs.
-							// This helps with textures that scroll and eventually reset to their starting
-							// position. Since the intended effect is usually to continue the scrolling motion,
-							// just reusing the previously known delta value that actually worked is usually a
-							// good enough strategy. This might break depending on the game if the UVs are used
-							// for anything that doesn't resemble this type of effect.
-							if ((deltaValue * (*deltaPtr)) < 0.0f) {
-								deltaValue = *deltaPtr;
-								*prevPtr = *newPtr - deltaValue;
-							}
-						}
-
-						break;
-					// Any other vertex element.
-					default:
-						break;
-					}
-
-					*deltaPtr = deltaValue;
-					prevPtr++;
-					newPtr++;
-					deltaPtr++;
-					f++;
-					i = (i + 1) % imax;
-				}
-			}
-		*/
-
 		// Update the instance.
 		RT64_INSTANCE_DESC instDesc = curInstance.desc;
 		instDesc.scissorRect = gfx_rt64_lerp_rect(prevInstance.desc.scissorRect, curInstance.desc.scissorRect, curFrameWeight);
@@ -1801,6 +1682,118 @@ inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *
 		gpuDl.drawCount++;
 	}
 }
+
+/*
+	// Interpolate the display lists.
+	auto displayListIt = RT64.displayLists.begin();
+	while (displayListIt != RT64.displayLists.end()) {
+		for (auto &dynMesh : displayListIt->second.meshes) {
+			if (!dynMesh.newVertexBufferValid) {
+				continue;
+			}
+
+			// Recreate the temporal buffer if required.
+			size_t requiredVertexBufferSize = dynMesh.vertexCount * dynMesh.vertexStride;
+			if (requiredVertexBufferSize > tempVertexBufferSize) {
+				free(tempVertexBuffer);
+				tempVertexBuffer = (float *)(malloc(requiredVertexBufferSize));
+				tempVertexBufferSize = requiredVertexBufferSize;
+			}
+
+			// Interpolate all the floats in the temporal vertex buffer.
+			size_t f = 0;
+			size_t floatCount = requiredVertexBufferSize / sizeof(float);
+			float *tempPtr = tempVertexBuffer;
+			float *prevPtr = dynMesh.prevVertexBuffer;
+			float *newPtr = dynMesh.newVertexBuffer;
+			while (f < floatCount) {
+				*tempPtr = gfx_rt64_lerp_float(*prevPtr, *newPtr, frameWeight);
+				tempPtr++;
+				prevPtr++;
+				newPtr++;
+				f++;
+			}
+
+			// Update the mesh using the temporal vertex buffer.
+			RT64.lib.SetMesh(dynMesh.mesh, tempVertexBuffer, dynMesh.vertexCount, dynMesh.vertexStride, RT64.indexTriangleList, dynMesh.indexCount);
+		}
+
+		displayListIt++;
+	}
+
+	// Compute the delta vertex buffer.
+	for (auto &dynMesh : dl.meshes) {
+		if (dynMesh.raytrace) {
+			rtInstanceCount++;
+		}
+		else {
+			rasterInstanceCount++;
+		}
+
+		if (!dynMesh.newVertexBufferValid) {
+			continue;
+		}
+
+		float *prevPtr = dynMesh.prevVertexBuffer;
+		float *newPtr = dynMesh.newVertexBuffer;
+		float *deltaPtr = dynMesh.deltaVertexBuffer;
+		size_t f = 0, i = 0;
+		size_t imax = dynMesh.vertexStride / sizeof(float);
+		size_t floatCount = dynMesh.vertexCount * imax;
+		float deltaValue = 0.0f;
+		const float Epsilon = 1e-6f;
+		const float MagnitudeThreshold = 10.0f;
+		while (f < floatCount) {
+			deltaValue = *newPtr - *prevPtr;
+
+			switch (i) {
+			// Position interpolation.
+			case 0:
+			case 1:
+			case 2:
+				// Skip interpolating objects that suddenly teleport the vertices around.
+				// This helps with effects like lava bubbles, snow, and other types of effects without
+				// having to generate UIDs for each individual particle.
+				// Since this relies on an arbitrary value to detect the magnitude difference, it might
+				// break depending on the game. The minimum value of 1.0 is also reliant on the fact
+				// the game never sends vertices with non-integer values when untransformed, making it
+				// the smallest possible value that isn't zero.
+				if ((fabsf(deltaValue) / std::max(fabsf(*deltaPtr), 1.0f)) >= MagnitudeThreshold) {
+					*prevPtr = *newPtr;
+				}
+
+				break;
+			// Texture coordinate interpolation.
+			case 7:
+			case 8:
+				if (dynMesh.useTexture) {
+					// Reuse previous delta if the delta values have different signs.
+					// This helps with textures that scroll and eventually reset to their starting
+					// position. Since the intended effect is usually to continue the scrolling motion,
+					// just reusing the previously known delta value that actually worked is usually a
+					// good enough strategy. This might break depending on the game if the UVs are used
+					// for anything that doesn't resemble this type of effect.
+					if ((deltaValue * (*deltaPtr)) < 0.0f) {
+						deltaValue = *deltaPtr;
+						*prevPtr = *newPtr - deltaValue;
+					}
+				}
+
+				break;
+			// Any other vertex element.
+			default:
+				break;
+			}
+
+			*deltaPtr = deltaValue;
+			prevPtr++;
+			newPtr++;
+			deltaPtr++;
+			f++;
+			i = (i + 1) % imax;
+		}
+	}
+	*/
 
 void gfx_rt64_render_thread_draw_frame(RenderFrame *curFrame, RenderFrame *prevFrame, float curFrameWeight) {
 	// Reset the draw counter for all active display lists.
@@ -1862,6 +1855,22 @@ void gfx_rt64_render_thread_draw_frame(RenderFrame *curFrame, RenderFrame *prevF
 
 	RT64.lib.SetViewPerspective(RT64.view, viewMatrix, fovRadians, curFrame->camera.nearDist, curFrame->camera.farDist, curFrame->interpolateCamera);
 
+	/*
+	// Interpolate the dynamic lights.
+	int levelIndex = gfx_rt64_get_level_index();
+	int areaIndex = gfx_rt64_get_area_index();
+	int areaLightCount = RT64.levelAreaLighting[levelIndex][areaIndex].lightCount;
+	for (int i = 0; i < RT64.dynamicLightCount; i++) {
+		auto &light = RT64.lights[areaLightCount + i];
+		const auto &prevLight = RT64.dynamicLights[i].prevLight;
+		const auto &newLight = RT64.dynamicLights[i].newLight;
+		light.position = gfx_rt64_lerp_vector3(prevLight.position, newLight.position, frameWeight);
+		light.attenuationRadius = gfx_rt64_lerp_float(prevLight.attenuationRadius, newLight.attenuationRadius, frameWeight);
+		light.pointRadius = gfx_rt64_lerp_float(prevLight.pointRadius, newLight.pointRadius, frameWeight);
+		light.shadowOffset = gfx_rt64_lerp_float(prevLight.shadowOffset, newLight.shadowOffset, frameWeight);
+	}
+	*/
+
 	// Update the scene.
 	RT64.lib.SetSceneLights(RT64.scene, curFrame->lights, curFrame->lightCount);
 	RT64.lib.SetSceneDescription(RT64.scene, curFrame->sceneDesc);
@@ -1892,11 +1901,18 @@ void gfx_rt64_render_thread_upload_texture_queue() {
 }
 
 void gfx_rt64_render_thread() {
-	LARGE_INTEGER StartTime, EndTime, ElapsedMicroseconds;
+	LARGE_INTEGER FrameStartTime, FrameEndTime, ElapsedMicroseconds;
 
 	// Setup scene and view.
 	RT64.scene = RT64.lib.CreateScene(RT64.device);
 	RT64.view = RT64.lib.CreateView(RT64.scene);
+	RT64.dlssSupport = RT64.lib.GetViewFeatureSupport(RT64.view, RT64_FEATURE_DLSS);
+	
+	// Draw at least one empty frame to fill the window.
+	RT64.lib.DrawDevice(RT64.device, gfx_rt64_use_vsync() ? 1 : 0);
+
+	// Preload shaders to avoid ingame stuttering.
+	gfx_rt64_render_thread_preload_shaders();
 
 	// Preload a blank texture.
 	const int BlankTextureSize = 64;
@@ -1914,9 +1930,16 @@ void gfx_rt64_render_thread() {
 	RT64.blankTexture = RT64.lib.CreateTexture(RT64.device, texDesc);
 	free(blankBytes);
 
+	// Upload any pending textures that the game has already queued up.
+	gfx_rt64_render_thread_upload_texture_queue();
+
+	// Unpause the game once the render thread has finished loading.
+	RT64.pauseMode = false;
+
 	int curFrameIndex = -1;
 	int prevFrameIndex = -1;
 	int renderTargetFPS = 30;
+	double frameDeltaTimeMs = (1000.0 / renderTargetFPS);
 	while (RT64.renderThreadRunning) {
 		// Create or destroy the inspector depending on the current state of the flag.
 		if (RT64.renderInspectorActive && (RT64.renderInspector == nullptr)) {
@@ -1937,6 +1960,7 @@ void gfx_rt64_render_thread() {
 			}
 		}
 
+		// Update any textures if necessary.
 		gfx_rt64_render_thread_upload_texture_queue();
 
 		// Retrieve the frame to draw if there's any and clear the last submitted frame.
@@ -1954,7 +1978,24 @@ void gfx_rt64_render_thread() {
 			const unsigned int framesPerUpdate = renderTargetFPS / 30;
 			const float weightPerFrame = 1.0f / framesPerUpdate;
 			for (int f = 0; f < framesPerUpdate; f++) {
+				// Print to the inspector the previous time it took to draw a frame.
+				if ((RT64.renderInspector != nullptr) && RT64.renderInspectorActive) {
+					const std::lock_guard<std::mutex> lock(RT64.renderInspectorMutex);
+					char renderDeltaTimeMsg[64];
+					sprintf(renderDeltaTimeMsg, "RENDER: %.3f ms\n", frameDeltaTimeMs);
+					RT64.lib.PrintClearInspector(RT64.renderInspector);
+					RT64.lib.PrintMessageInspector(RT64.renderInspector, renderDeltaTimeMsg);
+					for (const std::string &message : RT64.renderInspectorMessages) {
+						RT64.lib.PrintMessageInspector(RT64.renderInspector, message.c_str());
+					}
+				}
+
+				// Draw the frame and measure the time right before and right after.
+				QueryPerformanceCounter(&FrameStartTime);
 				gfx_rt64_render_thread_draw_frame(&RT64.renderFrames[curFrameIndex], &RT64.renderFrames[prevFrameIndex], (f + 1) * weightPerFrame);
+				QueryPerformanceCounter(&FrameEndTime);
+				elapsed_time(FrameStartTime, FrameEndTime, RT64.Frequency, ElapsedMicroseconds);
+				frameDeltaTimeMs = ElapsedMicroseconds.QuadPart / 1000.0;
 			}
 
 			// Clear the barrier.

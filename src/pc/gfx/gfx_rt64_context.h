@@ -249,6 +249,8 @@ struct RT64Context {
 	// Render thread.
 	std::thread *renderThread = nullptr;
 	RT64_INSPECTOR *renderInspector = nullptr;
+	std::vector<std::string> renderInspectorMessages;
+	std::mutex renderInspectorMutex;
 	RenderFrame renderFrames[MAX_RENDER_FRAMES];
 	int CPUFrameIndex = 0;
 	int GPUFrameIndex = -1;
@@ -291,8 +293,11 @@ struct RT64Context {
 	LARGE_INTEGER StartingTime, EndingTime;
 	LARGE_INTEGER Frequency;
 	bool dropNextFrame;
-	bool pauseMode;
 	bool turboMode;
+	std::atomic<bool> pauseMode;
+	
+	// Supported features.
+	std::atomic<bool> dlssSupport;
 
 	// Function pointers for game.
     void (*run_one_game_iter)(void);
