@@ -30,7 +30,7 @@
 #define MAX_LEVELS						40
 #define MAX_AREAS						3
 #define MAX_MOUSE_BUTTONS				5
-#define MAX_RENDER_FRAMES				3
+#define MAX_RENDER_FRAMES				4
 
 struct ShaderProgram {
     uint32_t shaderId;
@@ -115,8 +115,9 @@ struct RecordedDisplayList {
 };
 
 struct RecordedLight {
-	RT64_LIGHT prevLight;
-	RT64_LIGHT newLight;
+	RT64_LIGHT light;
+	uint32_t dlUid = 0;
+	int32_t dlInstIndex = -1;
 };
 
 struct AreaLighting {
@@ -127,6 +128,7 @@ struct AreaLighting {
 
 struct RenderInstance {
 	RT64_INSTANCE_DESC desc;
+	bool interpolate = true;
 	
 	struct {
 		uint32_t diffuse = 0;
@@ -248,6 +250,8 @@ struct RT64Context {
 	RT64_INSPECTOR *renderInspector = nullptr;
 	RenderFrame renderFrames[MAX_RENDER_FRAMES];
 	int CPUFrameIndex = 0;
+	int GPUFrameIndex = -1;
+	int BarrierFrameIndex = -1;
 	std::unordered_map<uint32_t, GPUDisplayList> GPUDisplayLists;
 	std::mutex renderFrameIndexMutex;
 	std::queue<uint32_t> textureUploadQueue;
