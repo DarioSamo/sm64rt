@@ -2,7 +2,7 @@
 
 #if defined(_WIN32) || defined(_WIN64)
 
-#if !defined(EXTERNAL_DATA) && !defined(RENDER_96_ALPHA)
+#if !defined(EXTERNAL_DATA) && !defined(DYNOS)
 #error "RT64 requires EXTERNAL_DATA to be enabled."
 #endif
 
@@ -738,13 +738,13 @@ static void gfx_rt64_rapi_select_texture(int tile, uint32_t texture_id) {
 static void gfx_rt64_rapi_upload_texture(const uint8_t *rgba32_buf, int width, int height) {
 	uint32_t textureKey = RT64.currentTextureIds[RT64.currentTile];
 	RT64_TEXTURE_DESC &texDesc = RT64.textures[textureKey].texDesc;
-	texDesc.byteCount = texDesc.height * texDesc.rowPitch;
-	texDesc.bytes = malloc(texDesc.byteCount);
-	memcpy(texDesc.bytes, rgba32_buf, texDesc.byteCount);
 	texDesc.width = width;
 	texDesc.height = height;
 	texDesc.rowPitch = texDesc.width * 4;
 	texDesc.format = RT64_TEXTURE_FORMAT_RGBA8;
+	texDesc.byteCount = texDesc.height * texDesc.rowPitch;
+	texDesc.bytes = malloc(texDesc.byteCount);
+	memcpy(texDesc.bytes, rgba32_buf, texDesc.byteCount);
 
 	RT64.textureUploadQueueMutex.lock();
 	RT64.textureUploadQueue.push(textureKey);
