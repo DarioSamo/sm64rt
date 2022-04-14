@@ -133,6 +133,44 @@ json gfx_rt64_save_scene_description(RT64_SCENE_DESC *sceneDesc) {
 	return jscene;
 }
 
+void gfx_rt64_default_level_lights() {
+	for (int l = 0; l < MAX_LEVELS; l++) {
+        for (int a = 0; a < MAX_AREAS; a++) {
+			auto &areaLighting = RT64.levelAreaLighting[l][a];
+			memset(areaLighting.lights, 0, sizeof(areaLighting.lights));
+			areaLighting.lightCount = 0;
+
+			// Configure the default area lighting scene description.
+			auto &sceneDesc = areaLighting.sceneDesc;
+			sceneDesc.ambientBaseColor = { 0.20f, 0.20f, 0.25f };
+			sceneDesc.ambientNoGIColor = { 0.10f, 0.15f, 0.20f };
+			sceneDesc.eyeLightDiffuseColor = { 0.1f, 0.1f, 0.1f };
+			sceneDesc.eyeLightSpecularColor = { 0.1f, 0.1f, 0.1f };
+			sceneDesc.skyDiffuseMultiplier = { 1.0f, 1.0f, 1.0f };
+			sceneDesc.skyHSLModifier = { 0.0f, 0.0f, 0.0f };
+			sceneDesc.skyYawOffset = 0.0f;
+			sceneDesc.giDiffuseStrength = 0.7f;
+			sceneDesc.giSkyStrength = 0.35f;
+
+			// Configure a default directional sun.
+			RT64_LIGHT &light = areaLighting.lights[0];
+            light.position.x = 100000.0f;
+            light.position.y = 200000.0f;
+            light.position.z = 100000.0f;
+            light.diffuseColor.x = 0.8f;
+            light.diffuseColor.y = 0.75f;
+            light.diffuseColor.z = 0.65f;
+            light.attenuationRadius = 1e11;
+			light.pointRadius = 5000.0f;
+            light.specularColor = { 0.8f, 0.75f, 0.65f };
+            light.shadowOffset = 0.0f;
+            light.attenuationExponent = 0.0f;
+			light.groupBits = RT64_LIGHT_GROUP_DEFAULT;
+            areaLighting.lightCount = 1;
+        }
+    }
+}
+
 void gfx_rt64_load_level_lights() {
 	std::ifstream i(LEVEL_LIGHTS_FILENAME);
 	if (i.is_open()) {
