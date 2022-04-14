@@ -174,6 +174,7 @@ struct RT64Context {
 	std::unordered_map<uint64_t, std::string> texNameMap;
 	std::map<std::string, uint64_t> nameTexMap;
 	std::unordered_map<uint64_t, RecordedMod *> texMods;
+	std::mutex texModsMutex;
 	std::map<uint64_t, uint64_t> texHashAliasMap;
 	std::map<uint64_t, std::vector<uint64_t>> texHashAliasesMap;
 	std::unordered_map<uint32_t, uint64_t> textureHashIdMap;
@@ -214,10 +215,10 @@ struct RT64Context {
 	unsigned int indexTriangleList[GFX_MAX_BUFFERED];
 
 	// Ray picking data.
-	bool pickTextureNextFrame = false;
+	bool pickTexture = false;
 	bool pickTextureHighlight = false;
-	uint64_t pickedTextureHash = 0;
-	std::unordered_map<RT64_INSTANCE *, uint64_t> lastInstanceTextureHashes;
+	uint64_t pickTextureHash = 0;
+	std::mutex pickTextureMutex;
 
 	// Matrices.
 	RT64_MATRIX4 identityTransform;

@@ -406,14 +406,16 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
         break;
 	case WM_RBUTTONDOWN:
 		if (RT64.renderInspectorActive) {
-			RT64.pickedTextureHash = 0;
-			RT64.pickTextureNextFrame = true;
+			const std::lock_guard<std::mutex> pickLock(RT64.pickTextureMutex);
+			RT64.pickTextureHash = 0;
+			RT64.pickTexture = true;
 			RT64.pickTextureHighlight = true;
 		}
 
 		break;
 	case WM_RBUTTONUP:
 		if (RT64.renderInspectorActive) {
+			const std::lock_guard<std::mutex> pickLock(RT64.pickTextureMutex);
 			RT64.pickTextureHighlight = false;
 		}
 
@@ -434,6 +436,7 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 		if (RT64.renderInspectorActive) {
 			if (wParam == VK_F5) {
 				const std::lock_guard<std::mutex> lightingLock(RT64.levelAreaLightingMutex);
+				const std::lock_guard<std::mutex> texModsLock(RT64.texModsMutex);
 				gfx_rt64_save_geo_layout_mods();
 				gfx_rt64_save_texture_mods();
 				gfx_rt64_save_level_lights();
@@ -965,20 +968,28 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 			textureHash = texAliasIt->second;
 		}
 
+		// Only use mutex access if the inspector is active.
+		bool threadSafeAccess = RT64.renderInspectorActive;
+		if (threadSafeAccess) {
+			RT64.texModsMutex.lock();
+			RT64.pickTextureMutex.lock();
+		}
+
 		// Use the texture mod for the matching texture hash.
 		auto texModIt = RT64.texMods.find(textureHash);
 		if (texModIt != RT64.texMods.end()) {
 			textureMod = texModIt->second;
 		}
-		
-		// Update data for ray picking.
-		/*
-		if (RT64.pickTextureHighlight && (recordedTexture.hash == RT64.pickedTextureHash)) {
-			highlightMaterial = true;
-		}
 
-		RT64.lastInstanceTextureHashes[instance] = recordedTexture.hash;
-		*/
+		if (threadSafeAccess) {
+			// Update data for ray picking.
+			if (RT64.pickTextureHighlight && (textureHash == RT64.pickTextureHash)) {
+				highlightMaterial = true;
+			}
+
+			RT64.texModsMutex.unlock();
+			RT64.pickTextureMutex.unlock();
+		}
 	}
 
 	// Build material with applied mods.
@@ -1273,55 +1284,6 @@ static void gfx_rt64_rapi_end_frame(void) {
 
 	// Clear variables for next frame.
 	RT64.skyTextureId = 0;
-	
-	/*
-	// Print debugging messages.
-	if (RT64.inspector != nullptr) {
-		char statsMessage[256] = "";
-    	sprintf(statsMessage, "RT %d Raster %d Lights %d Cached %d DynPoolSz %d", rtInstanceCount, rasterInstanceCount, RT64.lightCount, RT64.staticMeshCache.size(), RT64.dynamicMeshPool.size());
-    	RT64.lib.PrintMessageInspector(RT64.inspector, statsMessage);
-	}
-
-	// Left click allows to pick a texture for editing from the viewport.
-	if (RT64.pickTextureNextFrame) {
-		POINT cursorPos = {};
-		GetCursorPos(&cursorPos);
-		ScreenToClient(RT64.hwnd, &cursorPos);
-		RT64_INSTANCE *instance = RT64.lib.GetViewRaytracedInstanceAt(RT64.view, cursorPos.x, cursorPos.y);
-		if (instance != nullptr) {
-			auto instIt = RT64.lastInstanceTextureHashes.find(instance);
-			if (instIt != RT64.lastInstanceTextureHashes.end()) {
-				RT64.pickedTextureHash = instIt->second;
-			}
-		}
-		else {
-			RT64.pickedTextureHash = 0;
-		}
-
-		RT64.pickTextureNextFrame = false;
-	}
-
-	RT64.lastInstanceTextureHashes.clear();
-
-	// Edit last picked texture.
-	if (RT64.pickedTextureHash != 0) {
-		const std::string textureName = RT64.texNameMap[RT64.pickedTextureHash];
-		RecordedMod *texMod = RT64.texMods[RT64.pickedTextureHash];
-		if (texMod == nullptr) {
-			texMod = new RecordedMod();
-			RT64.texMods[RT64.pickedTextureHash] = texMod;
-		}
-
-		if (texMod->materialMod == nullptr) {
-			texMod->materialMod = new RT64_MATERIAL();
-			texMod->materialMod->enabledAttributes = RT64_ATTRIBUTE_NONE;
-		}
-
-		if (RT64.inspector != nullptr) {
-			RT64.lib.SetMaterialInspector(RT64.inspector, texMod->materialMod, textureName.c_str());
-		}
-	}
-	*/
 }
 
 static void gfx_rt64_rapi_finish_render(void) {
@@ -1762,6 +1724,26 @@ void gfx_rt64_render_thread_draw_frame(GameFrame *curFrame, GameFrame *prevFrame
 }
 
 void gfx_rt64_render_thread_preprocess_frames(GameFrame *curFrame, GameFrame *prevFrame) {
+	// Left click allows to pick a texture for editing from the viewport.
+	RT64_INSTANCE *pickSearchInstance = nullptr;
+	if (RT64.renderInspectorActive) {
+		const std::lock_guard<std::mutex> pickLock(RT64.pickTextureMutex);
+		if (RT64.pickTexture) {
+			POINT cursorPos = {};
+			GetCursorPos(&cursorPos);
+			ScreenToClient(RT64.hwnd, &cursorPos);
+			RT64_INSTANCE *instance = RT64.lib.GetViewRaytracedInstanceAt(RT64.view, cursorPos.x, cursorPos.y);
+			if (instance != nullptr) {
+				pickSearchInstance = instance;
+			}
+			else {
+				RT64.pickTextureHash = 0;
+			}
+
+			RT64.pickTexture = false;
+		}
+	}
+
 	int remainingStaticMeshesForCache = CACHED_MESH_MAX_PER_FRAME;
 	auto dlIt = curFrame->displayLists.begin();
 	while (dlIt != curFrame->displayLists.end()) {
@@ -1776,6 +1758,26 @@ void gfx_rt64_render_thread_preprocess_frames(GameFrame *curFrame, GameFrame *pr
 
 		if (gpuDl.meshes.size() < curDisplayList.drawCount) {
 			gpuDl.meshes.resize(curDisplayList.drawCount);
+		}
+
+		// Search for the matching instance inside the DLs and find the hash corresponding to the diffuse texture.
+		if (pickSearchInstance != nullptr) {
+			for (int i = 0; (i < gpuDl.drawCount) && (i < gpuDl.instances.size()); i++) {
+				if (gpuDl.instances[i].instance == pickSearchInstance) {
+					const std::lock_guard<std::mutex> pickLock(RT64.pickTextureMutex);
+					uint32_t diffuseId = curDisplayList.instances[i].textures.diffuse;
+					auto texIt = RT64.textures.find(diffuseId);
+					if ((diffuseId > 0) && (texIt != RT64.textures.end())) {
+						RT64.pickTextureHash = texIt->second.hash;
+					}
+					else {
+						RT64.pickTextureHash = 0;
+					}
+
+					pickSearchInstance = nullptr;
+					break;
+				}
+			}
 		}
 
 		if (remainingStaticMeshesForCache > 0) {
@@ -1925,6 +1927,7 @@ void gfx_rt64_render_thread() {
 
 					{
 						const std::lock_guard<std::mutex> lightingLock(RT64.levelAreaLightingMutex);
+						const std::lock_guard<std::mutex> pickLock(RT64.pickTextureMutex);
 						int levelIndex = gfx_rt64_get_level_index();
 						int areaIndex = gfx_rt64_get_area_index();
 
@@ -1935,6 +1938,25 @@ void gfx_rt64_render_thread() {
 						RT64_LIGHT *lights = RT64.levelAreaLighting[levelIndex][areaIndex].lights;
 						int *lightCount = &RT64.levelAreaLighting[levelIndex][areaIndex].lightCount;
 						RT64.lib.SetLightsInspector(RT64.renderInspector, lights, lightCount, MAX_LEVEL_LIGHTS);
+
+						// Inspect the current picked material.
+						if (RT64.pickTextureHash > 0) {
+							const std::lock_guard<std::mutex> texModsLock(RT64.texModsMutex);
+							auto texNameIt = RT64.texNameMap.find(RT64.pickTextureHash);
+							const std::string textureName = (texNameIt != RT64.texNameMap.end()) ? texNameIt->second : std::string();
+							RecordedMod *texMod = RT64.texMods[RT64.pickTextureHash];
+							if (texMod == nullptr) {
+								texMod = new RecordedMod();
+								RT64.texMods[RT64.pickTextureHash] = texMod;
+							}
+
+							if (texMod->materialMod == nullptr) {
+								texMod->materialMod = new RT64_MATERIAL();
+								texMod->materialMod->enabledAttributes = RT64_ATTRIBUTE_NONE;
+							}
+
+							RT64.lib.SetMaterialInspector(RT64.renderInspector, texMod->materialMod, textureName.c_str());
+						}
 					}
 				}
 
