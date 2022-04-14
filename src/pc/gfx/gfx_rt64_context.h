@@ -26,7 +26,6 @@
 #define CACHED_MESH_MAX_PER_FRAME		1
 #define MAX_LIGHTS						512
 #define MAX_LEVEL_LIGHTS				128
-#define MAX_DYNAMIC_LIGHTS				MAX_LIGHTS - MAX_LEVEL_LIGHTS
 #define MAX_LEVELS						40
 #define MAX_AREAS						3
 #define MAX_MOUSE_BUTTONS				5
@@ -37,46 +36,6 @@ struct ShaderProgram {
     uint8_t numInputs;
     bool usedTextures[2];
 	std::unordered_map<uint16_t, RT64_SHADER *> shaderVariantMap;
-};
-
-struct RecordedMesh {
-	float *prevVertexBuffer = nullptr;
-	uint64_t prevVertexBufferHash = 0;
-	float *newVertexBuffer = nullptr;
-	uint64_t newVertexBufferHash = 0;
-	bool newVertexBufferValid = false;
-	float *deltaVertexBuffer = nullptr;
-    RT64_MESH *mesh = nullptr;
-    uint32_t vertexCount = 0;
-	uint32_t vertexStride = 0;
-    uint32_t indexCount = 0;
-	uint32_t staticFrames = 0;
-	bool useTexture = false;
-    bool raytrace = false;
-};
-
-struct DynamicMesh {
-    RT64_MESH *mesh = nullptr;
-    uint32_t vertexCount = 0;
-	uint32_t vertexStride = 0;
-    uint32_t indexCount = 0;
-    bool raytrace = false;
-	bool inUse = false;
-};
-
-struct RecordedInstance {
-	RT64_INSTANCE *instance;
-	RT64_INSTANCE_DESC desc;
-
-	// Interpolated data.
-	RT64_MATRIX4 prevTransform;
-	RT64_MATRIX4 newTransform;
-	RT64_RECT prevScissorRect;
-	RT64_RECT newScissorRect;
-	RT64_RECT prevViewportRect;
-	RT64_RECT newViewportRect;
-	bool prevValid = false;
-	bool newValid = false;
 };
 
 struct RecordedTexture {
@@ -96,37 +55,13 @@ struct RecordedMod {
 	bool interpolationEnabled = true;
 };
 
-struct RecordedCamera {
-	RT64_MATRIX4 viewMatrix;
-	RT64_MATRIX4 invViewMatrix;
-	float fovRadians;
-	float nearDist;
-	float farDist;
-};
-
-struct RecordedDisplayList {
-	std::vector<RecordedInstance> instances;
-	std::vector<RecordedMesh> meshes;
-	RT64_MATRIX4 prevTransform;
-	RT64_MATRIX4 newTransform;
-	bool prevValid = false;
-	bool newValid = false;
-	int newCount = 0;
-};
-
-struct RecordedLight {
-	RT64_LIGHT light;
-	uint32_t dlUid = 0;
-	int32_t dlInstIndex = -1;
-};
-
 struct AreaLighting {
 	RT64_SCENE_DESC sceneDesc;
 	RT64_LIGHT lights[MAX_LEVEL_LIGHTS];
 	int lightCount = 0;
 };
 
-struct RenderInstance {
+struct GameInstance {
 	RT64_INSTANCE_DESC desc;
 	bool interpolate = true;
 	
@@ -145,9 +80,11 @@ struct RenderInstance {
 		bool normalMap;
 		bool specularMap;
 	} shader;
+
+	RT64_LIGHT light;
 };
 
-struct RenderMesh {
+struct GameMesh {
 	float *vertexBuffer = nullptr;
 	uint64_t vertexBufferHash = 0;
     uint32_t vertexCount = 0;
@@ -157,19 +94,26 @@ struct RenderMesh {
     bool raytrace = false;
 };
 
-struct RenderDisplayList {
-	std::vector<RenderInstance> instances;
-	std::vector<RenderMesh> meshes;
+struct GameDisplayList {
+	std::vector<GameInstance> instances;
+	std::vector<GameMesh> meshes;
+	RT64_MATRIX4 transform;
+	RT64_LIGHT light;
 	int drawCount = 0;
+	bool interpolateTransform = true;
 };
 
-struct RenderFrame {
-	RecordedCamera camera;
-	bool interpolateCamera = true;
-	std::unordered_map<uint32_t, RenderDisplayList> displayLists;
+struct GameFrame {
+	RT64_MATRIX4 viewMatrix;
+	RT64_MATRIX4 invViewMatrix;
+	float fovRadians;
+	float nearDist;
+	float farDist;
+	bool interpolateView = true;
+	std::unordered_map<uint32_t, GameDisplayList> displayLists;
 	RT64_SCENE_DESC sceneDesc;
-	RT64_LIGHT lights[MAX_LIGHTS];
-    unsigned int lightCount = 0;
+	const RT64_LIGHT *areaLights = nullptr;
+    unsigned int areaLightCount = 0;
 	uint32_t skyTextureId = 0;
 };
 
@@ -180,6 +124,8 @@ struct GPUInstance {
 
 struct GPUMesh {
 	RT64_MESH *mesh = nullptr;
+	float *deltaVertexBuffer = nullptr;
+	uint64_t deltaVertexBufferSize = 0;
 	uint64_t vertexBufferHash = 0;
 	bool raytrace = false;
 };
@@ -231,27 +177,21 @@ struct RT64Context {
 	std::unordered_map<uint32_t, uint64_t> textureHashIdMap;
 	
 	// Runtime data.
+	std::unordered_map<uint32_t, RecordedTexture> textures;
+	std::unordered_map<uint32_t, ShaderProgram *> shaderPrograms;
+	std::mutex shaderProgramsMutex;
+	std::unordered_map<void *, RecordedMod *> graphNodeMods;
+
+	// Render thread.
 	RT64_LIBRARY lib;
 	RT64_DEVICE *device = nullptr;
 	RT64_SCENE *scene = nullptr;
 	RT64_VIEW *view = nullptr;
-	std::unordered_map<uint32_t, RecordedTexture> textures;
-	std::unordered_map<uint32_t, ShaderProgram *> shaderPrograms;
-	std::mutex shaderProgramsMutex;
-	std::unordered_map<uint32_t, RecordedDisplayList> displayLists;
-	std::unordered_map<void *, RecordedMod *> graphNodeMods;
-	std::unordered_map<uint64_t, RT64_MESH *> staticMeshCache;
-	std::unordered_map<uint64_t, DynamicMesh> dynamicMeshPool;
-	unsigned int indexTriangleList[GFX_MAX_BUFFERED];
-    RecordedLight dynamicLights[MAX_DYNAMIC_LIGHTS];
-    unsigned int dynamicLightCount = 0;
-
-	// Render thread.
 	std::thread *renderThread = nullptr;
 	RT64_INSPECTOR *renderInspector = nullptr;
 	std::vector<std::string> renderInspectorMessages;
 	std::mutex renderInspectorMutex;
-	RenderFrame renderFrames[MAX_RENDER_FRAMES];
+	GameFrame frames[MAX_RENDER_FRAMES];
 	int CPUFrameIndex = 0;
 	int GPUFrameIndex = -1;
 	int BarrierFrameIndex = -1;
@@ -262,8 +202,11 @@ struct RT64Context {
 	RT64_VIEW_DESC renderViewDesc;
 	bool renderViewDescChanged = false;
 	std::mutex renderViewDescMutex;
+	RT64_LIGHT renderLights[MAX_LIGHTS];
+    unsigned int renderLightCount = 0;
 	std::atomic<bool> renderThreadRunning;
 	std::atomic<bool> renderInspectorActive;
+	unsigned int indexTriangleList[GFX_MAX_BUFFERED];
 
 	// Ray picking data.
 	bool pickTextureNextFrame = false;

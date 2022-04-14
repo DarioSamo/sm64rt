@@ -366,11 +366,6 @@ void gfx_rt64_apply_config() {
 	}
 }
 
-static void gfx_rt64_reset_logic_frame(void) {
-	RT64.skyTextureId = 0;
-    RT64.dynamicLightCount = 0;
-}
-
 static bool gfx_rt64_use_vsync() {
 	return RT64.useVsync && !RT64.turboMode;
 }
@@ -483,7 +478,6 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 			// Run one game iteration.
 			LARGE_INTEGER GameStartTime, GameEndTime;
 			QueryPerformanceCounter(&GameStartTime);
-			gfx_rt64_reset_logic_frame();
 			RT64.run_one_game_iter();
 			QueryPerformanceCounter(&GameEndTime);
 			elapsed_time(GameStartTime, GameEndTime, RT64.Frequency, ElapsedMicroseconds);
@@ -592,6 +586,7 @@ static void gfx_rt64_wapi_init(const char *window_title) {
 	RT64.fogColor.z = 0.0f;
 	RT64.skyDiffuseMultiplier = { 1.0f, 1.0f, 1.0f };
 	RT64.fogMul = RT64.fogOffset = 0;
+	RT64.skyTextureId = 0;
 	RT64.dlssSupport = false;
 
 	// Initialize the triangle list index array used by all meshes.
@@ -637,13 +632,11 @@ static void gfx_rt64_wapi_init(const char *window_title) {
 	RT64.defaultMaterial.fogEnabled = false;
 
 	// Initialize camera.
-	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
-	RecordedCamera defaultCamera;
-	defaultCamera.viewMatrix = RT64.identityTransform;
-    defaultCamera.nearDist = 1.0f;
-    defaultCamera.farDist = 1000.0f;
-    defaultCamera.fovRadians = 0.75f;
-	CPUFrame->camera = defaultCamera;
+	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
+	CPUFrame->viewMatrix = RT64.identityTransform;
+    CPUFrame->nearDist = 1.0f;
+    CPUFrame->farDist = 1000.0f;
+    CPUFrame->fovRadians = 0.75f;
 
 	// Apply loaded configuration.
 	gfx_rt64_apply_config();
@@ -828,7 +821,7 @@ static inline float gfx_rt64_norm_texcoord(float s, uint8_t address_mode) {
 	return s - long(s);
 }
 
-static void gfx_rt64_rapi_process_mesh(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris, bool raytrace, RenderDisplayList &displayList) {
+static void gfx_rt64_rapi_process_mesh(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris, bool raytrace, GameDisplayList &displayList) {
 	// Calculate the required size for each vertex based on the shader.
 	const bool useTexture = RT64.shaderProgram->usedTextures[0] || RT64.shaderProgram->usedTextures[1];
 	const int numInputs = RT64.shaderProgram->numInputs;
@@ -857,118 +850,37 @@ static void gfx_rt64_rapi_process_mesh(float buf_vbo[], size_t buf_vbo_len, size
 
 	// Try reusing the mesh that was stored in this index first.
 	auto &dynMesh = displayList.meshes[displayList.drawCount];
-	uint64_t curHash = dynMesh.vertexBufferHash;
+	if (hash != dynMesh.vertexBufferHash) {
+		// Free the previous vertex buffer if it's too small to fit the new vertex buffer.
+		if ((dynMesh.vertexBuffer != nullptr) && ((dynMesh.vertexCount * dynMesh.vertexStride) < (vertexCount * vertexStride))) {
+			free(dynMesh.vertexBuffer);
+			dynMesh.vertexBuffer = nullptr;
+		}
 
-	// We can reuse the mesh if the hash is the same.
-	if (hash == curHash) {
-		return;
-	}
-	// We can only reuse the mesh if the vertex buffers are compatible.
-	else if (
-		(dynMesh.vertexCount == vertexCount) && 
-		(dynMesh.vertexStride == vertexStride) && 
-		(dynMesh.indexCount == indexCount) && 
-		(dynMesh.raytrace == raytrace)
-	) {
+		// Only create the vertex buffer if it hasn't been assigned yet.
+		if (dynMesh.vertexBuffer == nullptr) {
+			dynMesh.vertexBuffer = (float *)(malloc(vertexBufferSize));
+		}
+
 		memcpy(dynMesh.vertexBuffer, vertexBuffer, vertexBufferSize);
+		dynMesh.vertexCount = vertexCount;
+		dynMesh.vertexStride = vertexStride;
+		dynMesh.indexCount = indexCount;
+		dynMesh.useTexture = useTexture;
+		dynMesh.raytrace = raytrace;
 		dynMesh.vertexBufferHash = hash;
-		return;
 	}
-	
-	// Destroy any previous pointers if they exist.
-	if (dynMesh.vertexBuffer != nullptr) {
-		free(dynMesh.vertexBuffer);
-		dynMesh.vertexBuffer = nullptr;
-	}
-
-	// Create the mesh.
-	dynMesh.vertexCount = vertexCount;
-	dynMesh.vertexStride = vertexStride;
-	dynMesh.indexCount = indexCount;
-	dynMesh.useTexture = useTexture;
-	dynMesh.raytrace = raytrace;
-	dynMesh.vertexBuffer = (float *)(malloc(vertexBufferSize));
-	memcpy(dynMesh.vertexBuffer, vertexBuffer, vertexBufferSize);
-	dynMesh.vertexBufferHash = hash;
-
-	/*
-	// Store the mesh in the display list.
-	if (!interpolate) {
-		// Search for a dynamic mesh that has the same hash.
-		auto dynamicMeshIt = RT64.dynamicMeshPool.find(hash);
-		if (dynamicMeshIt != RT64.dynamicMeshPool.end()) {
-			dynamicMeshIt->second.inUse = true;
-			return dynamicMeshIt->second.mesh;
-		}
-
-		// Search linearly for a compatible dynamic mesh.
-		uint64_t foundHash = 0;
-		for (auto dynamicMeshIt : RT64.dynamicMeshPool) {
-			if (
-				!dynamicMeshIt.second.inUse &&
-				(dynamicMeshIt.second.vertexCount == vertexCount) && 
-				(dynamicMeshIt.second.vertexStride == vertexStride) && 
-				(dynamicMeshIt.second.indexCount == indexCount) && 
-				(dynamicMeshIt.second.raytrace == raytrace)
-			) 
-			{
-				foundHash = dynamicMeshIt.first;
-				break;
-			}
-		}
-
-		// If we found a valid hash, change the hash where the mesh is stored.
-		if (foundHash != 0) {
-			RT64.dynamicMeshPool[hash] = RT64.dynamicMeshPool[foundHash];
-			RT64.dynamicMeshPool.erase(foundHash);
-		}
-
-		auto &dynamicMesh = RT64.dynamicMeshPool[hash];
-
-		// Create the mesh if it hasn't been created yet.
-		if (dynamicMesh.mesh == nullptr) {
-			dynamicMesh.mesh = RT64.lib.CreateMesh(RT64.device, raytrace ? (RT64_MESH_RAYTRACE_ENABLED | RT64_MESH_RAYTRACE_UPDATABLE) : 0);
-			dynamicMesh.vertexCount = vertexCount;
-			dynamicMesh.vertexStride = vertexStride;
-			dynamicMesh.indexCount = indexCount;
-			dynamicMesh.raytrace = raytrace;
-		}
-
-		dynamicMesh.inUse = true;
-		RT64.lib.SetMesh(dynamicMesh.mesh, vertexBuffer, vertexCount, vertexStride, RT64.indexTriangleList, indexCount);
-		return dynamicMesh.mesh;
-	}
-	*/
 }
 
+/*
 static void gfx_rt64_rapi_cache_static_rt_mesh(uint64_t key, const RecordedMesh &dynMesh) {
-	/*
 	RT64_MESH *mesh = RT64.lib.CreateMesh(RT64.device, RT64_MESH_RAYTRACE_ENABLED);
 	RT64.lib.SetMesh(mesh, dynMesh.prevVertexBuffer, dynMesh.vertexCount, dynMesh.vertexStride, RT64.indexTriangleList, dynMesh.indexCount);
 	RT64.staticMeshCache[key] = mesh;
-	*/
 }
+*/
 
-static void gfx_rt64_add_light(RT64_LIGHT *lightMod, RT64_MATRIX4 transform, uint32_t dlUid, int32_t dlInstIndex) {
-    assert(RT64.dynamicLightCount < MAX_DYNAMIC_LIGHTS);
-    auto &dynLight = RT64.dynamicLights[RT64.dynamicLightCount++];
-
-	dynLight.light = *lightMod;
-	dynLight.light.position = transform_position_affine(transform, lightMod->position);
-	dynLight.dlUid = dlUid;
-	dynLight.dlInstIndex = dlInstIndex;
-
-	// Use a vector that points in all three axes in case the node uses non-uniform scaling to get an estimate.
-	RT64_VECTOR3 scaleVector = transform_direction_affine(transform, { 1.0f, 1.0f, 1.0f });
-	float scale = vector_length(scaleVector) / sqrt(3);
-	dynLight.light.attenuationRadius *= scale;
-	dynLight.light.pointRadius *= scale;
-	dynLight.light.shadowOffset *= scale;
-}
-
-static void gfx_rt64_rapi_apply_mod(RT64_MATERIAL *material, uint32_t *normal, uint32_t *specular, bool *interpolate,
-	 RecordedMod *mod, RT64_MATRIX4 transform, bool applyLight, uint32_t dlUid, int32_t dlInstIndex) 
-{
+static void gfx_rt64_rapi_apply_mod(RT64_MATERIAL *material, uint32_t *normal, uint32_t *specular, bool *interpolate, RecordedMod *mod, RT64_MATRIX4 transform) {
 	if (!mod->interpolationEnabled) {
 		*interpolate = false;
 	}
@@ -976,10 +888,6 @@ static void gfx_rt64_rapi_apply_mod(RT64_MATERIAL *material, uint32_t *normal, u
 	if (mod->materialMod != NULL) {
 		RT64_ApplyMaterialAttributes(material, mod->materialMod);
 	}
-
-	if (applyLight && (mod->lightMod != NULL)) {
-        gfx_rt64_add_light(mod->lightMod, transform, dlUid, dlInstIndex);
-    }
 
 	if (mod->normalMapHash != 0) {
 		auto hashIt = RT64.textureHashIdMap.find(mod->normalMapHash);
@@ -1004,7 +912,7 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 	assert(RT64.shaderProgram != nullptr);
 
 	// Retrieve the previous transform for the display list with this UID and store the current one.
-	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
+	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
 	auto &displayList = CPUFrame->displayLists[uid];
 	RecordedMod *textureMod = nullptr;
 	bool linearFilter = false;
@@ -1017,6 +925,8 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 	}
 
 	auto &displayListInstance = displayList.instances[displayList.drawCount];
+	displayListInstance.light.groupBits = 0;
+	
 	RT64_INSTANCE_DESC &instDesc = displayListInstance.desc;
 	instDesc.scissorRect = RT64.scissorRect;
 	instDesc.viewportRect = RT64.viewportRect;
@@ -1067,10 +977,7 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 			&displayListInstance.textures.specular,
 			&interpolate,
 			RT64.graphNodeMod,
-			transform,
-			false,
-			uid,
-			displayList.drawCount);
+			transform);
 	}
 
 	if (textureMod != nullptr) {
@@ -1080,10 +987,11 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 			&displayListInstance.textures.specular,
 			&interpolate,
 			textureMod,
-			transform,
-			true,
-			uid,
-			displayList.drawCount);
+			transform);
+		
+		if (textureMod->lightMod != nullptr) {
+			displayListInstance.light = *textureMod->lightMod;
+		}
 	}
 
 	// Apply a higlight color if the material is selected.
@@ -1168,10 +1076,10 @@ static void gfx_rt64_rapi_shutdown(void) {
 }
 
 static void gfx_rt64_rapi_start_frame(void) {
-	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
+	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
 
-	// Reset frame camera interpolation.
-	CPUFrame->interpolateCamera = true;
+	// Reset frame view interpolation.
+	CPUFrame->interpolateView = true;
 
 	// Determine cursor visibility base on the current camera mouselook support and the inspector.
 	bool newCursorVisible = (!RT64.isFullScreen && !RT64.mouselookEnabled) || (RT64.renderInspectorActive);
@@ -1182,14 +1090,6 @@ static void gfx_rt64_rapi_start_frame(void) {
 	
 	RT64.background = true;
     RT64.graphNodeMod = nullptr;
-
-	// Reset display lists on the current CPU frame.
-	auto dlIt = CPUFrame->displayLists.begin();
-	while (dlIt != CPUFrame->displayLists.end()) {
-		auto &dl = dlIt->second;
-		dl.drawCount = 0;
-		dlIt++;
-	}
 
 	/*
 	if (RT64.inspector != nullptr) {
@@ -1270,7 +1170,7 @@ static inline bool gfx_rt64_skip_matrix_lerp(const RT64_MATRIX4 &a, const RT64_M
 
 static void gfx_rt64_rapi_set_special_stage_lights(int levelIndex, int areaIndex) {
 	/*
-	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
+	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
 
 	// Dynamic Lakitu camera light for Shifting Sand Land Pyramid.
 	if ((levelIndex == 8) && (areaIndex == 2)) {
@@ -1298,33 +1198,24 @@ static void gfx_rt64_rapi_set_special_stage_lights(int levelIndex, int areaIndex
 }
 
 static void gfx_rt64_rapi_end_frame(void) {
-	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
+	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
 
-	// Add all dynamic lights for this stage first.
-	{
-    	int levelIndex = gfx_rt64_get_level_index();
-    	int areaIndex = gfx_rt64_get_area_index();
-		gfx_rt64_rapi_set_special_stage_lights(levelIndex, areaIndex);
+	// Add the special stage lights.
+	int levelIndex = gfx_rt64_get_level_index();
+	int areaIndex = gfx_rt64_get_area_index();
+	gfx_rt64_rapi_set_special_stage_lights(levelIndex, areaIndex);
 
-		// Update the scene's description.
-		const auto &areaLighting = RT64.levelAreaLighting[levelIndex][areaIndex];
-		CPUFrame->sceneDesc = areaLighting.sceneDesc;
-		CPUFrame->sceneDesc.skyDiffuseMultiplier.x *= RT64.skyDiffuseMultiplier.x;
-		CPUFrame->sceneDesc.skyDiffuseMultiplier.y *= RT64.skyDiffuseMultiplier.y;
-		CPUFrame->sceneDesc.skyDiffuseMultiplier.z *= RT64.skyDiffuseMultiplier.z;
-		CPUFrame->skyTextureId = RT64.skyTextureId;
+	// Update the scene's description.
+	const auto &areaLighting = RT64.levelAreaLighting[levelIndex][areaIndex];
+	CPUFrame->sceneDesc = areaLighting.sceneDesc;
+	CPUFrame->sceneDesc.skyDiffuseMultiplier.x *= RT64.skyDiffuseMultiplier.x;
+	CPUFrame->sceneDesc.skyDiffuseMultiplier.y *= RT64.skyDiffuseMultiplier.y;
+	CPUFrame->sceneDesc.skyDiffuseMultiplier.z *= RT64.skyDiffuseMultiplier.z;
+	CPUFrame->skyTextureId = RT64.skyTextureId;
 
-		// Build lights array out of the static level lights and the dynamic lights.
-		int areaLightCount = areaLighting.lightCount;
-		CPUFrame->lightCount = areaLightCount/* + RT64.dynamicLightCount*/;
-		assert(CPUFrame->lightCount <= MAX_LIGHTS);
-		memcpy(CPUFrame->lights, areaLighting.lights, sizeof(RT64_LIGHT) * areaLightCount);
-		/*
-		for (int i = 0; i < RT64.dynamicLightCount; i++) {
-			memcpy(&RT64.lights[areaLightCount + i], &RT64.dynamicLights[i].newLight, sizeof(RT64_LIGHT));
-		}
-		*/
-	}
+	// Assign the area's lights to this frame.
+	CPUFrame->areaLights = areaLighting.lights;
+	CPUFrame->areaLightCount = areaLighting.lightCount;
 
 	// Clean up any unused instances or meshes from the display lists.
 	auto dlIt = CPUFrame->displayLists.begin();
@@ -1345,7 +1236,7 @@ static void gfx_rt64_rapi_end_frame(void) {
 		}
 
 		// Keep the display list if it's not empty. Erase it otherwise.
-		if (!dl.instances.empty() || !dl.meshes.empty()) {
+		if (!dl.instances.empty() || !dl.meshes.empty() || (dl.light.groupBits > 0)) {
 			dlIt++;
 		}
 		else {
@@ -1367,6 +1258,19 @@ static void gfx_rt64_rapi_end_frame(void) {
 		const std::lock_guard<std::mutex> lock(RT64.renderFrameIndexMutex);
 		waitForBarrier = (RT64.CPUFrameIndex == RT64.BarrierFrameIndex);
 	}
+
+	// Reset display lists for the next CPU frame.
+	CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
+	dlIt = CPUFrame->displayLists.begin();
+	while (dlIt != CPUFrame->displayLists.end()) {
+		auto &dl = dlIt->second;
+		dl.light.groupBits = 0;
+		dl.drawCount = 0;
+		dlIt++;
+	}
+
+	// Clear variables for next frame.
+	RT64.skyTextureId = 0;
 	
 	/*
 	// Print debugging messages.
@@ -1416,23 +1320,9 @@ static void gfx_rt64_rapi_end_frame(void) {
 		}
 	}
 
-	// Display list cleanup.
+	// Static cache conditions.
 	int maxCaches = CACHED_MESH_MAX_PER_FRAME;
-	dlIt = RT64.displayLists.begin();
-	while (dlIt != RT64.displayLists.end()) {
-		auto &dl = dlIt->second;
 
-		// Move attributes from new to prev for instances.
-		for (auto &dynInst : dl.instances) {
-			dynInst.prevTransform = dynInst.newTransform;
-			dynInst.prevScissorRect = dynInst.newScissorRect;
-			dynInst.prevViewportRect = dynInst.newViewportRect;
-			dynInst.prevValid = true;
-			dynInst.newValid = false;
-		}
-
-		// Move attributes from new to prev for meshes.
-		for (auto &dynMesh : dl.meshes) {
 			if (!dynMesh.newVertexBufferValid) {
 				if (
 					configRT64StaticMeshCache &&
@@ -1447,31 +1337,6 @@ static void gfx_rt64_rapi_end_frame(void) {
 
 				continue;
 			}
-
-			float *swapBuffer = dynMesh.prevVertexBuffer;
-			uint64_t swapHash = dynMesh.prevVertexBufferHash;
-			dynMesh.prevVertexBuffer = dynMesh.newVertexBuffer;
-			dynMesh.prevVertexBufferHash = dynMesh.newVertexBufferHash;
-			dynMesh.newVertexBuffer = swapBuffer;
-			dynMesh.newVertexBufferHash = swapHash;
-			dynMesh.newVertexBufferValid = false;
-		}
-
-		dlIt++;
-	}
-
-	// Dynamic mesh pool cleanup.
-	auto dynamicMeshIt = RT64.dynamicMeshPool.begin();
-	while (dynamicMeshIt != RT64.dynamicMeshPool.end()) {
-		if (dynamicMeshIt->second.inUse) {
-			dynamicMeshIt->second.inUse = false;
-			dynamicMeshIt++;
-        }
-		else {
-			RT64.lib.DestroyMesh(dynamicMeshIt->second.mesh);
-			dynamicMeshIt = RT64.dynamicMeshPool.erase(dynamicMeshIt);
-		}
-	}
 	*/
 }
 
@@ -1480,17 +1345,17 @@ static void gfx_rt64_rapi_finish_render(void) {
 }
 
 static void gfx_rt64_rapi_set_camera_perspective(float fov_degrees, float near_dist, float far_dist, bool can_interpolate) {
-	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
-    CPUFrame->camera.fovRadians = (fov_degrees / 180.0f) * M_PI;
-	CPUFrame->camera.nearDist = near_dist;
-    CPUFrame->camera.farDist = far_dist;
-	CPUFrame->interpolateCamera = CPUFrame->interpolateCamera && can_interpolate;
+	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
+    CPUFrame->fovRadians = (fov_degrees / 180.0f) * M_PI;
+	CPUFrame->nearDist = near_dist;
+    CPUFrame->farDist = far_dist;
+	CPUFrame->interpolateView = CPUFrame->interpolateView && can_interpolate;
 }
 
 static void gfx_rt64_rapi_set_camera_matrix(float matrix[4][4]) {
-	RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
-	memcpy(&CPUFrame->camera.viewMatrix.m, matrix, sizeof(float) * 16);
-    gd_inverse_mat4f(&CPUFrame->camera.viewMatrix.m, &CPUFrame->camera.invViewMatrix.m);
+	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
+	memcpy(&CPUFrame->viewMatrix.m, matrix, sizeof(float) * 16);
+    gd_inverse_mat4f(&CPUFrame->viewMatrix.m, &CPUFrame->invViewMatrix.m);
 }
 
 static void gfx_rt64_rapi_register_layout_graph_node(void *geoLayout, void *graphNode) {
@@ -1555,10 +1420,13 @@ static void *gfx_rt64_rapi_build_graph_node_mod(void *graphNode, float modelview
         RecordedMod *graphNodeMod = (RecordedMod *) (graphNodeIt->second);
         if (graphNodeMod != nullptr) {
             if (graphNodeMod->lightMod != nullptr) {
-				RenderFrame *CPUFrame = &RT64.renderFrames[RT64.CPUFrameIndex];
+				GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
+				auto &displayList = CPUFrame->displayLists[uid];
 				RT64_MATRIX4 transform;
-                gfx_matrix_mul(transform.m, modelview_matrix, CPUFrame->camera.invViewMatrix.m);
-                gfx_rt64_add_light(graphNodeMod->lightMod, transform, uid, -1);
+                gfx_matrix_mul(transform.m, modelview_matrix, CPUFrame->invViewMatrix.m);
+				displayList.light = *graphNodeMod->lightMod;
+				displayList.transform = transform;
+				displayList.interpolateTransform = (uid != 0) && graphNodeMod->interpolationEnabled;
             }
 
             return graphNodeMod;
@@ -1605,9 +1473,123 @@ RT64_TEXTURE *gfx_rt64_render_thread_find_texture(uint32_t textureKey) {
 	}
 }
 
-inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *curFrame, RenderFrame *prevFrame, float curFrameWeight) {
+inline void gfx_rt64_render_thread_interpolate_mesh(GPUMesh &dstMesh, const GameMesh &curMesh, const GameMesh &prevMesh, float curFrameWeight) {
 	static float *tempVertexBuffer = nullptr;
 	static size_t tempVertexBufferSize = 0;
+
+	// Create the delta vertex buffer if it hasn't been created yet or recreate it if it's too small.
+	uint64_t requiredVertexBufferSize = curMesh.vertexCount * curMesh.vertexStride;
+	if ((dstMesh.deltaVertexBuffer == nullptr) || (requiredVertexBufferSize > dstMesh.deltaVertexBufferSize)) {
+		free(dstMesh.deltaVertexBuffer);
+		dstMesh.deltaVertexBuffer = (float *)(malloc(requiredVertexBufferSize));
+		memset(dstMesh.deltaVertexBuffer, 0, requiredVertexBufferSize);
+		dstMesh.deltaVertexBufferSize = requiredVertexBufferSize;
+	}
+
+	// Recreate the temporal buffer if required.
+	if (requiredVertexBufferSize > tempVertexBufferSize) {
+		free(tempVertexBuffer);
+		tempVertexBuffer = (float *)(malloc(requiredVertexBufferSize));
+		tempVertexBufferSize = requiredVertexBufferSize;
+	}
+
+	// FIXME: Since this was ported from the single-threaded code, the delta vertex buffer computations and 
+	// comparisons are repeated unnecessarily for every single frame that is drawn. There's not exactly a 
+	// good equivalent spot to place this on the main thread yet, but it might be better to just parallelize
+	// this at some point or move it to a compute shader anyway.
+	const float *prevPtr = prevMesh.vertexBuffer;
+	const float *curPtr = curMesh.vertexBuffer;
+	float *deltaPtr = dstMesh.deltaVertexBuffer;
+	float *tempPtr = tempVertexBuffer;
+	size_t f = 0, i = 0;
+	size_t imax = curMesh.vertexStride / sizeof(float);
+	size_t floatCount = curMesh.vertexCount * imax;
+	float deltaValue = 0.0f;
+	const float Epsilon = 1e-6f;
+	const float MagnitudeThreshold = 10.0f;
+	while (f < floatCount) {
+		deltaValue = *curPtr - *prevPtr;
+		
+		switch (i) {
+		// Position interpolation.
+		case 0:
+		case 1:
+		case 2:
+			// Skip interpolating objects that suddenly teleport the vertices around.
+			// This helps with effects like lava bubbles, snow, and other types of effects without
+			// having to generate UIDs for each individual particle.
+			// Since this relies on an arbitrary value to detect the magnitude difference, it might
+			// break depending on the game. The minimum value of 1.0 is also reliant on the fact
+			// the game never sends vertices with non-integer values when untransformed, making it
+			// the smallest possible value that isn't zero.
+			if ((fabsf(deltaValue) / std::max(fabsf(*deltaPtr), 1.0f)) >= MagnitudeThreshold) {
+				*tempPtr = *curPtr;
+			}
+			else {
+				*tempPtr = gfx_rt64_lerp_float(*prevPtr, *curPtr, curFrameWeight);
+			}
+
+			break;
+		// Texture coordinate interpolation.
+		case 7:
+		case 8:
+			if (curMesh.useTexture) {
+				// Reuse previous delta if the delta values have different signs.
+				// This helps with textures that scroll and eventually reset to their starting
+				// position. Since the intended effect is usually to continue the scrolling motion,
+				// just reusing the previously known delta value that actually worked is usually a
+				// good enough strategy. This might break depending on the game if the UVs are used
+				// for anything that doesn't resemble this type of effect.
+				if ((deltaValue * (*deltaPtr)) < 0.0f) {
+					deltaValue = *deltaPtr;
+					*tempPtr = *curPtr - deltaValue;
+					break;
+				}
+			}
+			
+			*tempPtr = gfx_rt64_lerp_float(*prevPtr, *curPtr, curFrameWeight);
+			break;
+		// Any other vertex element.
+		default:
+			*tempPtr = gfx_rt64_lerp_float(*prevPtr, *curPtr, curFrameWeight);
+			break;
+		}
+
+		*deltaPtr = deltaValue;
+		prevPtr++;
+		curPtr++;
+		tempPtr++;
+		deltaPtr++;
+		f++;
+		i = (i + 1) % imax;
+	}
+
+	// Update the mesh using the temporal vertex buffer.
+	RT64.lib.SetMesh(dstMesh.mesh, tempVertexBuffer, curMesh.vertexCount, curMesh.vertexStride, RT64.indexTriangleList, curMesh.indexCount);
+	dstMesh.vertexBufferHash = curMesh.vertexBufferHash;
+}
+
+inline void gfx_rt64_render_thread_add_light(const RT64_LIGHT &srcLight, const RT64_MATRIX4 &transform) {
+	assert(RT64.renderLightCount < MAX_LIGHTS);
+	auto &dstLight = RT64.renderLights[RT64.renderLightCount++];
+	dstLight = srcLight;
+	dstLight.position = transform_position_affine(transform, srcLight.position);
+	
+	// Use a vector that points in all three axes in case the node uses non-uniform scaling to get an estimate.
+	RT64_VECTOR3 scaleVector = transform_direction_affine(transform, { 1.0f, 1.0f, 1.0f });
+	float scale = vector_length(scaleVector) / sqrtf(3.0f);
+	dstLight.attenuationRadius *= scale;
+	dstLight.pointRadius *= scale;
+	dstLight.shadowOffset *= scale;
+	/*
+	printf("%f %f %f diffuseColor %f %f %f attenuationRadius %f\n", 
+	dstLight.position.x, dstLight.position.y, dstLight.position.z, 
+	dstLight.diffuseColor.x, dstLight.diffuseColor.y, dstLight.diffuseColor.z, 
+	dstLight.attenuationRadius);
+	*/
+}
+
+inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, GameFrame *curFrame, GameFrame *prevFrame, float curFrameWeight) {
 	auto &gpuDl = RT64.GPUDisplayLists[uid];
 	const auto &curDisplayList = curFrame->displayLists[uid];
 	const auto &prevDisplayList = prevFrame->displayLists[uid];
@@ -1625,12 +1607,15 @@ inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *
 		auto &dstMesh = gpuDl.meshes[i];
 		auto &dstInstance = gpuDl.instances[i];
 		const auto &curMesh = curDisplayList.meshes[i];
+		const auto &prevMesh = (i < prevDisplayList.meshes.size()) ? prevDisplayList.meshes[i] : curDisplayList.meshes[i];
 		const auto &curInstance = curDisplayList.instances[i];
 		const auto &prevInstance = (i < prevDisplayList.instances.size()) ? prevDisplayList.instances[i] : curDisplayList.instances[i];
 
 		// Destroy the existing mesh if the raytracing mode is different.
 		if ((dstMesh.mesh != nullptr) && (dstMesh.raytrace != curMesh.raytrace)) {
+			free(dstMesh.deltaVertexBuffer);
 			RT64.lib.DestroyMesh(dstMesh.mesh);
+			dstMesh.deltaVertexBuffer = nullptr;
 			dstMesh.mesh = nullptr;
 		}
 
@@ -1640,12 +1625,26 @@ inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *
 			dstMesh.raytrace = curMesh.raytrace;
 		}
 
-		// Update the mesh if the vertex buffer hash is different.
+		// Check if current and previous meshes are different.
+		if (curInstance.interpolate && (curMesh.vertexBufferHash != prevMesh.vertexBufferHash)) {
+			bool meshesCompatible = 
+				(curMesh.vertexCount == prevMesh.vertexCount) &&
+				(curMesh.vertexStride == prevMesh.vertexStride) &&
+				(curMesh.indexCount == prevMesh.indexCount) &&
+				(curMesh.raytrace == prevMesh.raytrace);
+
+			// If the meshes are compatible, we interpolate using the delta buffer instead.
+			if (meshesCompatible) {
+				gfx_rt64_render_thread_interpolate_mesh(dstMesh, curMesh, prevMesh, curFrameWeight);
+			}
+		}
+
+		// Update the mesh altogether if the vertex buffer hashes are different.
 		if (dstMesh.vertexBufferHash != curMesh.vertexBufferHash) {
 			RT64.lib.SetMesh(dstMesh.mesh, curMesh.vertexBuffer, curMesh.vertexCount, curMesh.vertexStride, RT64.indexTriangleList, curMesh.indexCount);
 			dstMesh.vertexBufferHash = curMesh.vertexBufferHash;
 		}
-
+		
 		// Create the instance if it doesn't exist yet.
 		if (dstInstance.instance == nullptr) {
 			dstInstance.instance = RT64.lib.CreateInstance(RT64.scene);
@@ -1676,126 +1675,30 @@ inline void gfx_rt64_render_thread_draw_display_list(uint32_t uid, RenderFrame *
 			instDesc.transform = gfx_rt64_lerp_matrix(prevInstance.desc.transform, curInstance.desc.transform, curFrameWeight);
 		}
 
+		// Update the instance.
 		RT64.lib.SetInstanceDescription(dstInstance.instance, instDesc);
 		dstInstance.transform = instDesc.transform;
 
+		// Apply the display list instance light (if applicable).
+		if (curInstance.light.groupBits > 0) {
+			gfx_rt64_render_thread_add_light(curInstance.light, instDesc.transform);
+		}
+
 		gpuDl.drawCount++;
+	}
+	
+	// Apply the display list light (if applicable).
+	if (curDisplayList.light.groupBits > 0) {
+		RT64_MATRIX4 transform = curDisplayList.interpolateTransform ? gfx_rt64_lerp_matrix(prevDisplayList.transform, curDisplayList.transform, curFrameWeight) : curDisplayList.transform;
+		gfx_rt64_render_thread_add_light(curDisplayList.light, transform);
 	}
 }
 
-/*
-	// Interpolate the display lists.
-	auto displayListIt = RT64.displayLists.begin();
-	while (displayListIt != RT64.displayLists.end()) {
-		for (auto &dynMesh : displayListIt->second.meshes) {
-			if (!dynMesh.newVertexBufferValid) {
-				continue;
-			}
-
-			// Recreate the temporal buffer if required.
-			size_t requiredVertexBufferSize = dynMesh.vertexCount * dynMesh.vertexStride;
-			if (requiredVertexBufferSize > tempVertexBufferSize) {
-				free(tempVertexBuffer);
-				tempVertexBuffer = (float *)(malloc(requiredVertexBufferSize));
-				tempVertexBufferSize = requiredVertexBufferSize;
-			}
-
-			// Interpolate all the floats in the temporal vertex buffer.
-			size_t f = 0;
-			size_t floatCount = requiredVertexBufferSize / sizeof(float);
-			float *tempPtr = tempVertexBuffer;
-			float *prevPtr = dynMesh.prevVertexBuffer;
-			float *newPtr = dynMesh.newVertexBuffer;
-			while (f < floatCount) {
-				*tempPtr = gfx_rt64_lerp_float(*prevPtr, *newPtr, frameWeight);
-				tempPtr++;
-				prevPtr++;
-				newPtr++;
-				f++;
-			}
-
-			// Update the mesh using the temporal vertex buffer.
-			RT64.lib.SetMesh(dynMesh.mesh, tempVertexBuffer, dynMesh.vertexCount, dynMesh.vertexStride, RT64.indexTriangleList, dynMesh.indexCount);
-		}
-
-		displayListIt++;
-	}
-
-	// Compute the delta vertex buffer.
-	for (auto &dynMesh : dl.meshes) {
-		if (dynMesh.raytrace) {
-			rtInstanceCount++;
-		}
-		else {
-			rasterInstanceCount++;
-		}
-
-		if (!dynMesh.newVertexBufferValid) {
-			continue;
-		}
-
-		float *prevPtr = dynMesh.prevVertexBuffer;
-		float *newPtr = dynMesh.newVertexBuffer;
-		float *deltaPtr = dynMesh.deltaVertexBuffer;
-		size_t f = 0, i = 0;
-		size_t imax = dynMesh.vertexStride / sizeof(float);
-		size_t floatCount = dynMesh.vertexCount * imax;
-		float deltaValue = 0.0f;
-		const float Epsilon = 1e-6f;
-		const float MagnitudeThreshold = 10.0f;
-		while (f < floatCount) {
-			deltaValue = *newPtr - *prevPtr;
-
-			switch (i) {
-			// Position interpolation.
-			case 0:
-			case 1:
-			case 2:
-				// Skip interpolating objects that suddenly teleport the vertices around.
-				// This helps with effects like lava bubbles, snow, and other types of effects without
-				// having to generate UIDs for each individual particle.
-				// Since this relies on an arbitrary value to detect the magnitude difference, it might
-				// break depending on the game. The minimum value of 1.0 is also reliant on the fact
-				// the game never sends vertices with non-integer values when untransformed, making it
-				// the smallest possible value that isn't zero.
-				if ((fabsf(deltaValue) / std::max(fabsf(*deltaPtr), 1.0f)) >= MagnitudeThreshold) {
-					*prevPtr = *newPtr;
-				}
-
-				break;
-			// Texture coordinate interpolation.
-			case 7:
-			case 8:
-				if (dynMesh.useTexture) {
-					// Reuse previous delta if the delta values have different signs.
-					// This helps with textures that scroll and eventually reset to their starting
-					// position. Since the intended effect is usually to continue the scrolling motion,
-					// just reusing the previously known delta value that actually worked is usually a
-					// good enough strategy. This might break depending on the game if the UVs are used
-					// for anything that doesn't resemble this type of effect.
-					if ((deltaValue * (*deltaPtr)) < 0.0f) {
-						deltaValue = *deltaPtr;
-						*prevPtr = *newPtr - deltaValue;
-					}
-				}
-
-				break;
-			// Any other vertex element.
-			default:
-				break;
-			}
-
-			*deltaPtr = deltaValue;
-			prevPtr++;
-			newPtr++;
-			deltaPtr++;
-			f++;
-			i = (i + 1) % imax;
-		}
-	}
-	*/
-
-void gfx_rt64_render_thread_draw_frame(RenderFrame *curFrame, RenderFrame *prevFrame, float curFrameWeight) {
+void gfx_rt64_render_thread_draw_frame(GameFrame *curFrame, GameFrame *prevFrame, float curFrameWeight) {
+	// Copy the frame's static lights.
+	memcpy(RT64.renderLights, curFrame->areaLights, sizeof(RT64_LIGHT) * curFrame->areaLightCount);
+	RT64.renderLightCount = curFrame->areaLightCount;
+	
 	// Reset the draw counter for all active display lists.
 	auto gpuDlIt = RT64.GPUDisplayLists.begin();
 	while (gpuDlIt != RT64.GPUDisplayLists.end()) {
@@ -1826,6 +1729,7 @@ void gfx_rt64_render_thread_draw_frame(RenderFrame *curFrame, RenderFrame *prevF
 		// Destroy all unused meshes.
 		while (dl.meshes.size() > dl.drawCount) {
 			auto &dynMesh = dl.meshes.back();
+			free(dynMesh.deltaVertexBuffer);
 			RT64.lib.DestroyMesh(dynMesh.mesh);
 			dl.meshes.pop_back();
 		}
@@ -1836,24 +1740,24 @@ void gfx_rt64_render_thread_draw_frame(RenderFrame *curFrame, RenderFrame *prevF
 	// Interpolate and update the view.
 	RT64_MATRIX4 viewMatrix;
 	float fovRadians;
-	bool interpolateCamera = curFrame->interpolateCamera;
+	bool interpolateView = curFrame->interpolateView;
 
 	// Detect if camera interpolation should be skipped.
 	// Attempts to fix sudden camera changes like the ones in BBH.
-	if (interpolateCamera && gfx_rt64_skip_matrix_lerp(prevFrame->camera.viewMatrix, curFrame->camera.viewMatrix, 0.0f)) {
-		interpolateCamera = false;
+	if (interpolateView && gfx_rt64_skip_matrix_lerp(prevFrame->viewMatrix, curFrame->viewMatrix, 0.0f)) {
+		interpolateView = false;
 	}
 
-	if (interpolateCamera) {
-		viewMatrix = gfx_rt64_lerp_matrix(prevFrame->camera.viewMatrix, curFrame->camera.viewMatrix, curFrameWeight);
-		fovRadians = gfx_rt64_lerp_float(prevFrame->camera.fovRadians, curFrame->camera.fovRadians, curFrameWeight);
+	if (interpolateView) {
+		viewMatrix = gfx_rt64_lerp_matrix(prevFrame->viewMatrix, curFrame->viewMatrix, curFrameWeight);
+		fovRadians = gfx_rt64_lerp_float(prevFrame->fovRadians, curFrame->fovRadians, curFrameWeight);
 	}
 	else {
-		viewMatrix = curFrame->camera.viewMatrix;
-		fovRadians = curFrame->camera.fovRadians;
+		viewMatrix = curFrame->viewMatrix;
+		fovRadians = curFrame->fovRadians;
 	}
 
-	RT64.lib.SetViewPerspective(RT64.view, viewMatrix, fovRadians, curFrame->camera.nearDist, curFrame->camera.farDist, curFrame->interpolateCamera);
+	RT64.lib.SetViewPerspective(RT64.view, viewMatrix, fovRadians, curFrame->nearDist, curFrame->farDist, curFrame->interpolateView);
 
 	/*
 	// Interpolate the dynamic lights.
@@ -1872,7 +1776,7 @@ void gfx_rt64_render_thread_draw_frame(RenderFrame *curFrame, RenderFrame *prevF
 	*/
 
 	// Update the scene.
-	RT64.lib.SetSceneLights(RT64.scene, curFrame->lights, curFrame->lightCount);
+	RT64.lib.SetSceneLights(RT64.scene, RT64.renderLights, RT64.renderLightCount);
 	RT64.lib.SetSceneDescription(RT64.scene, curFrame->sceneDesc);
 	RT64.lib.SetViewSkyPlane(RT64.view, (curFrame->skyTextureId > 0) ? RT64.textures[curFrame->skyTextureId].texture : nullptr);
 
@@ -1992,7 +1896,7 @@ void gfx_rt64_render_thread() {
 
 				// Draw the frame and measure the time right before and right after.
 				QueryPerformanceCounter(&FrameStartTime);
-				gfx_rt64_render_thread_draw_frame(&RT64.renderFrames[curFrameIndex], &RT64.renderFrames[prevFrameIndex], (f + 1) * weightPerFrame);
+				gfx_rt64_render_thread_draw_frame(&RT64.frames[curFrameIndex], &RT64.frames[prevFrameIndex], (f + 1) * weightPerFrame);
 				QueryPerformanceCounter(&FrameEndTime);
 				elapsed_time(FrameStartTime, FrameEndTime, RT64.Frequency, ElapsedMicroseconds);
 				frameDeltaTimeMs = ElapsedMicroseconds.QuadPart / 1000.0;
