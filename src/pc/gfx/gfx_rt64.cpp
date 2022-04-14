@@ -1164,32 +1164,35 @@ static inline bool gfx_rt64_skip_matrix_lerp(const RT64_MATRIX4 &a, const RT64_M
 }
 
 static void gfx_rt64_rapi_set_special_stage_lights(int levelIndex, int areaIndex) {
-	/*
 	GameFrame *CPUFrame = &RT64.frames[RT64.CPUFrameIndex];
 
 	// Dynamic Lakitu camera light for Shifting Sand Land Pyramid.
 	if ((levelIndex == 8) && (areaIndex == 2)) {
-        // Build the dynamic light.
-		// TODO: Add interpolation support.
-        auto &dynLight = RT64.dynamicLights[RT64.dynamicLightCount++];
-		RT64_VECTOR3 viewPos = { CPUFrame->camera.invViewMatrix.m[3][0], CPUFrame->camera.invViewMatrix.m[3][1], CPUFrame->camera.invViewMatrix.m[3][2] };
+		auto &dl = CPUFrame->displayLists[0];
+		RT64_VECTOR3 viewPos = { CPUFrame->invViewMatrix.m[3][0], CPUFrame->invViewMatrix.m[3][1], CPUFrame->invViewMatrix.m[3][2] };
 		RT64_VECTOR3 marioPos = { gMarioState->pos[0], gMarioState->pos[1], gMarioState->pos[2] };
-		dynLight.light.diffuseColor.x = 1.0f;
-		dynLight.light.diffuseColor.y = 0.9f;
-		dynLight.light.diffuseColor.z = 0.5f;
-		dynLight.light.position.x = viewPos.x + (viewPos.x - marioPos.x);
-		dynLight.light.position.y = viewPos.y + 150.0f;
-		dynLight.light.position.z = viewPos.z + (viewPos.z - marioPos.z);
-		dynLight.light.attenuationRadius = 4000.0f;
-		dynLight.light.attenuationExponent = 1.0f;
-		dynLight.light.pointRadius = 25.0f;
-		dynLight.light.specularColor = { 0.65f, 0.585f, 0.325f };
-		dynLight.light.shadowOffset = 1000.0f;
-		dynLight.light.groupBits = RT64_LIGHT_GROUP_DEFAULT;
-		dynLight.dlUid = 0;
-		dynLight.dlInstIndex = -1;
+
+		// Set the transform towards the back of the camera facing away from Mario.
+		dl.transform = RT64.identityTransform;
+		dl.transform.m[3][0] = viewPos.x + (viewPos.x - marioPos.x);
+		dl.transform.m[3][1] = viewPos.y + 150.0f;
+		dl.transform.m[3][2] = viewPos.z + (viewPos.z - marioPos.z);
+		
+		// Configure the rest of the light.
+		auto &light = dl.light;
+		light.position.x = 0.0f;
+		light.position.y = 0.0f;
+		light.position.z = 0.0f;
+		light.diffuseColor.x = 1.0f;
+		light.diffuseColor.y = 0.9f;
+		light.diffuseColor.z = 0.5f;
+		light.attenuationRadius = 4000.0f;
+		light.attenuationExponent = 1.0f;
+		light.pointRadius = 25.0f;
+		light.specularColor = { 0.65f, 0.585f, 0.325f };
+		light.shadowOffset = 1000.0f;
+		light.groupBits = RT64_LIGHT_GROUP_DEFAULT;
 	}
-	*/
 }
 
 static void gfx_rt64_rapi_end_frame(void) {
