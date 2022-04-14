@@ -128,6 +128,7 @@ struct GPUMesh {
 	uint64_t deltaVertexBufferSize = 0;
 	uint64_t vertexBufferHash = 0;
 	bool raytrace = false;
+	int staticFrames = 0;
 };
 
 struct GPUDisplayList {
@@ -196,6 +197,7 @@ struct RT64Context {
 	int GPUFrameIndex = -1;
 	int BarrierFrameIndex = -1;
 	std::unordered_map<uint32_t, GPUDisplayList> GPUDisplayLists;
+	std::unordered_map<uint64_t, GPUMesh> GPUStaticMeshes;
 	std::mutex renderFrameIndexMutex;
 	std::queue<uint32_t> textureUploadQueue;
 	std::mutex textureUploadQueueMutex;
@@ -204,6 +206,8 @@ struct RT64Context {
 	std::mutex renderViewDescMutex;
 	RT64_LIGHT renderLights[MAX_LIGHTS];
     unsigned int renderLightCount = 0;
+	unsigned int staticMeshesDrawn = 0;
+	unsigned int dynamicMeshesDrawn = 0;
 	std::atomic<bool> renderThreadRunning;
 	std::atomic<bool> renderInspectorActive;
 	unsigned int indexTriangleList[GFX_MAX_BUFFERED];
