@@ -1007,6 +1007,10 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 	instDesc.material.fogOffset = RT64.fogOffset;
 	instDesc.material.fogEnabled = (RT64.shaderProgram->shaderId & SHADER_OPT_FOG) != 0;
 
+	// HACK: Add a depth bias based on how many instances have been drawn so far to push
+	// coplanar stuff above other meshes on the anyhit sorting.
+	instDesc.material.depthBias += RT64.instancesDrawn * 0.001f;
+
 	unsigned int filter = linearFilter ? RT64_SHADER_FILTER_LINEAR : RT64_SHADER_FILTER_POINT;
 	unsigned int hAddr = (cms & G_TX_CLAMP) ? RT64_SHADER_ADDRESSING_CLAMP : (cms & G_TX_MIRROR) ? RT64_SHADER_ADDRESSING_MIRROR : RT64_SHADER_ADDRESSING_WRAP;
 	unsigned int vAddr = (cmt & G_TX_CLAMP) ? RT64_SHADER_ADDRESSING_CLAMP : (cmt & G_TX_MIRROR) ? RT64_SHADER_ADDRESSING_MIRROR : RT64_SHADER_ADDRESSING_WRAP;
@@ -1033,8 +1037,9 @@ static void gfx_rt64_rapi_draw_triangles_common(RT64_MATRIX4 transform, float bu
 
 	gfx_rt64_rapi_process_mesh(buf_vbo, buf_vbo_len, buf_vbo_num_tris, raytrace, displayList);
 	
-	// Increase the counter.
+	// Increase the counters.
 	displayList.drawCount++;
+	RT64.instancesDrawn++;
 }
 
 void gfx_rt64_rapi_set_fog(uint8_t fog_r, uint8_t fog_g, uint8_t fog_b, int16_t fog_mul, int16_t fog_offset) {
@@ -1088,6 +1093,7 @@ static void gfx_rt64_rapi_start_frame(void) {
 		RT64.cursorVisible = newCursorVisible;
 	}
 	
+	RT64.instancesDrawn = 0;
 	RT64.background = true;
     RT64.graphNodeMod = nullptr;
 

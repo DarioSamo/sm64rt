@@ -222,6 +222,7 @@ struct RT64Context {
 	RT64_MATRIX4 identityTransform;
 
 	// Rendering state.
+	int instancesDrawn = 0;
 	int currentTile = 0;
     uint32_t currentTextureIds[2] = { 0, 0 };
 	ShaderProgram *shaderProgram = nullptr;
