@@ -1843,7 +1843,9 @@ void gfx_rt64_render_thread() {
 	int curFrameIndex = -1;
 	int prevFrameIndex = -1;
 	int renderTargetFPS = 30;
-	double frameDeltaTimeMs = (1000.0 / renderTargetFPS);
+	const double FrameSkippingMultiplier = 1.05;
+	double targetDeltaTimeMs = (1000.0 / renderTargetFPS);
+	double frameDeltaTimeMs = targetDeltaTimeMs;
 	while (RT64.renderThreadRunning) {
 		// Create or destroy the inspector depending on the current state of the flag.
 		if (RT64.renderInspectorActive && (RT64.renderInspector == nullptr)) {
@@ -1859,6 +1861,7 @@ void gfx_rt64_render_thread() {
 			const std::lock_guard<std::mutex> lock(RT64.renderViewDescMutex);
 			if (RT64.renderViewDescChanged) {
 				renderTargetFPS = RT64.targetFPS;
+				targetDeltaTimeMs = (1000.0 / renderTargetFPS);
 				RT64.lib.SetViewDescription(RT64.view, RT64.renderViewDesc);
 				RT64.renderViewDescChanged = false;
 			}
@@ -1900,6 +1903,12 @@ void gfx_rt64_render_thread() {
 				QueryPerformanceCounter(&FrameEndTime);
 				elapsed_time(FrameStartTime, FrameEndTime, RT64.Frequency, ElapsedMicroseconds);
 				frameDeltaTimeMs = ElapsedMicroseconds.QuadPart / 1000.0;
+
+				// Start skipping frames if it took considerably longer than the target framerate to draw a frame.
+				if (frameDeltaTimeMs > (targetDeltaTimeMs * FrameSkippingMultiplier)) {
+					int framesToSkip = (int)(frameDeltaTimeMs / targetDeltaTimeMs);
+					f += framesToSkip;
+				}
 			}
 
 			// Clear the barrier.
