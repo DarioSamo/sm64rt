@@ -167,6 +167,7 @@ struct RT64Context {
 	RT64_MATERIAL defaultMaterial;
 	RT64_TEXTURE *blankTexture = nullptr;
 	AreaLighting levelAreaLighting[MAX_LEVELS][MAX_AREAS];
+	std::mutex levelAreaLightingMutex;
 	std::unordered_map<void *, std::string> geoLayoutNameMap;
 	std::map<std::string, void *> nameGeoLayoutMap;
 	std::unordered_map<void *, RecordedMod *> geoLayoutMods;

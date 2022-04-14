@@ -433,6 +433,7 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 		
 		if (RT64.renderInspectorActive) {
 			if (wParam == VK_F5) {
+				const std::lock_guard<std::mutex> lightingLock(RT64.levelAreaLightingMutex);
 				gfx_rt64_save_geo_layout_mods();
 				gfx_rt64_save_texture_mods();
 				gfx_rt64_save_level_lights();
@@ -497,6 +498,17 @@ LRESULT CALLBACK gfx_rt64_wnd_proc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 				sprintf(gameDeltaTimeMsg, "GAME: %.3f ms\n", ElapsedMicroseconds.QuadPart / 1000.0);
 				RT64.renderInspectorMessages.clear();
 				RT64.renderInspectorMessages.push_back(std::string(gameDeltaTimeMsg));
+
+				char marioMessage[256] = "";
+				char levelMessage[256] = "";
+				int levelIndex = gfx_rt64_get_level_index();
+				int areaIndex = gfx_rt64_get_area_index();
+				sprintf(marioMessage, "Mario pos: %.1f %.1f %.1f", gMarioState->pos[0], gMarioState->pos[1], gMarioState->pos[2]);
+				sprintf(levelMessage, "Level #%d Area #%d", levelIndex, areaIndex);
+				RT64.renderInspectorMessages.push_back(std::string(marioMessage));
+				RT64.renderInspectorMessages.push_back(std::string(levelMessage));
+				RT64.renderInspectorMessages.push_back(std::string("F1: Toggle inspectors"));
+				RT64.renderInspectorMessages.push_back(std::string("F5: Save all configuration"));
 			}
 		}
 
@@ -1096,29 +1108,6 @@ static void gfx_rt64_rapi_start_frame(void) {
 	RT64.instancesDrawn = 0;
 	RT64.background = true;
     RT64.graphNodeMod = nullptr;
-
-	/*
-	if (RT64.inspector != nullptr) {
-		char marioMessage[256] = "";
-		char levelMessage[256] = "";
-        int levelIndex = gfx_rt64_get_level_index();
-        int areaIndex = gfx_rt64_get_area_index();
-		sprintf(marioMessage, "Mario pos: %.1f %.1f %.1f", gMarioState->pos[0], gMarioState->pos[1], gMarioState->pos[2]);
-        sprintf(levelMessage, "Level #%d Area #%d", levelIndex, areaIndex);
-		RT64.lib.PrintMessageInspector(RT64.inspector, marioMessage);
-		RT64.lib.PrintMessageInspector(RT64.inspector, levelMessage);
-		RT64.lib.PrintMessageInspector(RT64.inspector, "F1: Toggle inspectors");
-		RT64.lib.PrintMessageInspector(RT64.inspector, "F5: Save all configuration");
-
-		// Inspect the current scene.
-		RT64.lib.SetSceneInspector(RT64.inspector, &RT64.levelAreaLighting[levelIndex][areaIndex].sceneDesc);
-
-		// Inspect the current level's lights.
-        RT64_LIGHT *lights = RT64.levelAreaLighting[levelIndex][areaIndex].lights;
-        int *lightCount = &RT64.levelAreaLighting[levelIndex][areaIndex].lightCount;
-		RT64.lib.SetLightsInspector(RT64.inspector, lights, lightCount, MAX_LEVEL_LIGHTS);
-	}
-	*/
 }
 
 static inline int gfx_rt64_lerp_int(int a, int b, float t) {
@@ -1211,17 +1200,21 @@ static void gfx_rt64_rapi_end_frame(void) {
 	int areaIndex = gfx_rt64_get_area_index();
 	gfx_rt64_rapi_set_special_stage_lights(levelIndex, areaIndex);
 
-	// Update the scene's description.
-	const auto &areaLighting = RT64.levelAreaLighting[levelIndex][areaIndex];
-	CPUFrame->sceneDesc = areaLighting.sceneDesc;
-	CPUFrame->sceneDesc.skyDiffuseMultiplier.x *= RT64.skyDiffuseMultiplier.x;
-	CPUFrame->sceneDesc.skyDiffuseMultiplier.y *= RT64.skyDiffuseMultiplier.y;
-	CPUFrame->sceneDesc.skyDiffuseMultiplier.z *= RT64.skyDiffuseMultiplier.z;
-	CPUFrame->skyTextureId = RT64.skyTextureId;
+	{
+		const std::lock_guard<std::mutex> lightingLock(RT64.levelAreaLightingMutex);
+		
+		// Update the scene's description.
+		const auto &areaLighting = RT64.levelAreaLighting[levelIndex][areaIndex];
+		CPUFrame->sceneDesc = areaLighting.sceneDesc;
+		CPUFrame->sceneDesc.skyDiffuseMultiplier.x *= RT64.skyDiffuseMultiplier.x;
+		CPUFrame->sceneDesc.skyDiffuseMultiplier.y *= RT64.skyDiffuseMultiplier.y;
+		CPUFrame->sceneDesc.skyDiffuseMultiplier.z *= RT64.skyDiffuseMultiplier.z;
+		CPUFrame->skyTextureId = RT64.skyTextureId;
 
-	// Assign the area's lights to this frame.
-	CPUFrame->areaLights = areaLighting.lights;
-	CPUFrame->areaLightCount = areaLighting.lightCount;
+		// Assign the area's lights to this frame.
+		CPUFrame->areaLights = areaLighting.lights;
+		CPUFrame->areaLightCount = areaLighting.lightCount;
+	}
 
 	// Clean up any unused instances or meshes from the display lists.
 	auto dlIt = CPUFrame->displayLists.begin();
@@ -1925,6 +1918,20 @@ void gfx_rt64_render_thread() {
 					RT64.lib.PrintMessageInspector(RT64.renderInspector, renderDeltaTimeMsg);
 					for (const std::string &message : RT64.renderInspectorMessages) {
 						RT64.lib.PrintMessageInspector(RT64.renderInspector, message.c_str());
+					}
+
+					{
+						const std::lock_guard<std::mutex> lightingLock(RT64.levelAreaLightingMutex);
+						int levelIndex = gfx_rt64_get_level_index();
+						int areaIndex = gfx_rt64_get_area_index();
+
+						// Inspect the current scene.
+						RT64.lib.SetSceneInspector(RT64.renderInspector, &RT64.levelAreaLighting[levelIndex][areaIndex].sceneDesc);
+
+						// Inspect the current level's lights.
+						RT64_LIGHT *lights = RT64.levelAreaLighting[levelIndex][areaIndex].lights;
+						int *lightCount = &RT64.levelAreaLighting[levelIndex][areaIndex].lightCount;
+						RT64.lib.SetLightsInspector(RT64.renderInspector, lights, lightCount, MAX_LEVEL_LIGHTS);
 					}
 				}
 
